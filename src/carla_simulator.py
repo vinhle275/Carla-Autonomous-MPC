@@ -39,28 +39,19 @@ class CarlaSimulator:
         blueprint_library = self.world.get_blueprint_library()
         vehicle_bp = blueprint_library.filter(vehicle_name)[0]
 
-        # Tìm waypoint gần nhất trên mặt đường để xác định độ cao Z chuẩn và tránh va chạm vách
+        # Đặt xe CHÍNH XÁC tại vị trí waypoint xuất phát (x, y), lấy độ cao Z từ mặt đường
         wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
-        if wp:
-            # Ưu tiên lấy vị trí chuẩn trên làn đường để tránh spawn đâm vào vỉa hè/tường
-            spawn_x = wp.transform.location.x
-            spawn_y = wp.transform.location.y
-            spawn_z = wp.transform.location.z + 1.0  # Nâng cao 1.0m để xe rơi nhẹ xuống đường, tránh lún bánh
-            if yaw_rad is None or yaw_rad == 0.0:
-                yaw_deg = wp.transform.rotation.yaw
-            else:
-                yaw_deg = np.rad2deg(yaw_rad)
-        else:
-            spawn_x, spawn_y = x, y
-            spawn_z = 1.0 if z is None else z + 1.0
-            yaw_deg = np.rad2deg(yaw_rad)
+        spawn_x = x
+        spawn_y = y
+        spawn_z = (wp.transform.location.z + 0.5) if wp else (0.5 if z is None else z + 0.5)
+        yaw_deg = np.rad2deg(yaw_rad)
 
         spawn_location = carla.Location(x=spawn_x, y=spawn_y, z=spawn_z)
         spawn_rotation = carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
         spawn_transform = carla.Transform(location=spawn_location, rotation=spawn_rotation)
 
         self.ego_vehicle = self.world.spawn_actor(vehicle_bp, spawn_transform)
-        print(f"[CARLA] Đã tạo xe {vehicle_name} tại tọa độ x={spawn_x:.2f}, y={spawn_y:.2f}, z={spawn_z:.2f}, yaw={yaw_deg:.1f}°")
+        print(f"[CARLA] Đã tạo xe {vehicle_name} tại đúng điểm bắt đầu x={spawn_x:.2f}, y={spawn_y:.2f}, z={spawn_z:.2f}, yaw={yaw_deg:.1f}°")
         return self.ego_vehicle
 
     def set_spectator(self, x=0.0, y=0.0, z=30.0, pitch=-60.0, yaw=0.0):
@@ -78,7 +69,7 @@ class CarlaSimulator:
                 pass
 
     def draw_full_trajectory_3d(self, x_traj, y_traj, theta_traj=None, life_time=300.0):
-        """Vẽ toàn bộ quỹ đạo 001 lên không gian 3D của CARLA."""
+        """Vẽ toàn bộ quỹ đạo lên không gian 3D của CARLA."""
         debug = self.world.debug
         last_z = 0.5
         for i in range(len(x_traj)):
@@ -96,7 +87,7 @@ class CarlaSimulator:
                 debug.draw_arrow(loc, end_loc, thickness=0.05, arrow_size=0.15, color=carla.Color(255, 0, 0), life_time=life_time)
 
     def draw_horizon_path(self, x_ref, y_ref, life_time=0.2):
-        """Vẽ đoạn quỹ đạo N bước MPC đang nhìn thấy phía trước (đường đỏ)"""
+        """Vẽ đoạn quỹ đạo N bước MPC đang nhìn thấy phía前 (đường đỏ)"""
         debug = self.world.debug
         for i in range(len(x_ref) - 1):
             p1 = carla.Location(x=x_ref[i], y=y_ref[i], z=0.5)

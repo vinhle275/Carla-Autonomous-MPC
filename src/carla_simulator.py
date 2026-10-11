@@ -16,7 +16,7 @@ import carla
 from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2
 
 class CarlaSimulator:
-    def __init__(self, host='172.20.240.1', port=2000):
+    def __init__(self, host='127.0.0.1', port=2000):
         print(f"[CARLA] Kết nối tới CARLA Server tại {host}:{port}...")
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)

@@ -93,8 +93,11 @@ class MpcController:
             self.control_buffer["acceleration"] = self.control_buffer["acceleration"][1:] + [acceleration_m_s_2]
             self.control_buffer["wheel_angle"] = self.control_buffer["wheel_angle"][1:] + [wheel_angle_rad]
             self.buffer_index = 0
-        except Exception:
-            print("[MPC WARNING] IPOPT calculation failed/delayed. Using buffered control step.")
+        # except Exception:
+            # print("[MPC WARNING] IPOPT calculation failed/delayed. Using buffered control step.")
+        except Exception as e:
+            print(f"[MPC WARNING] {e}")
+
             self.is_success = False
 
     def get_controls_value(self):

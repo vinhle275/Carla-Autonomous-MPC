@@ -23,7 +23,7 @@ def main():
     total_waypoints = len(x_traj)
 
     # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát
-    carla = CarlaSimulator(host='172.20.240.1', port=2000)
+    carla = CarlaSimulator(host='127.0.0.1', port=2000)
     
     x_init = x_traj[0]
     y_init = y_traj[0]

@@ -1,12 +1,10 @@
 import glob
 import os
 import sys
-import math
-import matplotlib.pyplot as plt
 
-# Thêm thư viện carla nếu có file .egg
+# Boilerplate code để nhận diện thư viện carla chuẩn theo vị trí file
 try:
-    sys.path.append(glob.glob(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + '/carla/dist/carla-*%d.%d-%s.egg' % (
+    sys.path.append(glob.glob(os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + '/carla/dist/carla-*%d.%d-%s.egg' % (
         sys.version_info.major,
         sys.version_info.minor,
         'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
@@ -14,6 +12,8 @@ except IndexError:
     pass
 
 import carla
+import matplotlib.pyplot as plt
+import math
 
 class WaypointPicker:
     def __init__(self, carla_y_data, carla_x_data, invert_y=False, invert_x=False):
@@ -43,7 +43,7 @@ class WaypointPicker:
     def on_click(self, event):
         if event.inaxes != self.ax:
             return
-            
+
         if self.fig.canvas.toolbar.mode != "":
             return
             
@@ -88,7 +88,7 @@ class WaypointPicker:
         plt.show()
         return self.clicked_points
 
-def get_2d_map_and_ping_waypoints(host='172.20.240.1', port=2000):
+def get_2d_map_and_ping_waypoints(host='127.0.0.1', port=2000):
     print("[CARLA] Đang kết nối với CARLA Server để đọc bản đồ...")
     client = carla.Client(host, port)
     client.set_timeout(10.0)
@@ -106,12 +106,14 @@ def get_2d_map_and_ping_waypoints(host='172.20.240.1', port=2000):
     print("- Click chuột phải để xóa điểm neo (Undo).")
     print("- Bấm phím ENTER để kết thúc chọn và xuất tọa độ.")
     print("========================================================\n")
-
-    picker = WaypointPicker(carla_y_data, carla_x_data)
+    
+    picker = WaypointPicker(carla_y_data, carla_x_data, invert_y=False, invert_x=False)
     clicked_points = picker.get_points()
 
-    x_anchors = [round(float(y), 2) for (x, y) in clicked_points]
-    y_anchors = [round(float(x), 2) for (x, y) in clicked_points]
+    x_anchors = [round(float(y), 2) for (x, y) in clicked_points] # CARLA X
+    y_anchors = [round(float(x), 2) for (x, y) in clicked_points] # CARLA Y
     
+    print(f"x_anchors = {x_anchors}")
+    print(f"y_anchors = {y_anchors}")
     print(f"[XONG] Đã chọn {len(x_anchors)} điểm neo.")
     return x_anchors, y_anchors

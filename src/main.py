@@ -22,8 +22,8 @@ def main():
     x_traj, y_traj, theta_traj, v_ref_traj = load_csv_trajectory()
     total_waypoints = len(x_traj)
 
-    # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát
-    carla = CarlaSimulator(host='172.20.240.1', port=2000)
+    # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát (đọc host từ config.py)
+    carla = CarlaSimulator()
     
     x_init = x_traj[0]
     y_init = y_traj[0]

@@ -9,6 +9,10 @@ PLOTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../plots")
 )
 
+# --- CẤU HÌNH KẾT NỐI CARLA SERVER ---
+CARLA_HOST = '172.20.240.1'    # Đổi thành '127.0.0.1' hoặc IP máy chủ CARLA nếu chạy WSL2/máy khác (vd: '172.20.240.1')
+CARLA_PORT = 2000
+
 # --- VẬN TỐC THAM CHIẾU MONG MUỐN ---
 TARGET_SPEED_MS = 10.0       # Vận tốc mục tiêu (m/s) -> 2 m/s
 OVERRIDE_V_REF = True        # Tự động nâng tốc độ trong CSV lên TARGET_SPEED_MS nhưng vẫn giữ giảm tốc an toàn khi vào cua

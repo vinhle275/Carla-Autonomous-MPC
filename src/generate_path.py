@@ -39,15 +39,21 @@ def main():
     # 3. Ghi dữ liệu ra CSV trong thư mục data/
     save_waypoints_to_csv(trajectory, TRAJECTORY_CSV_PATH)
 
-    # 4. Hiển thị 3D trên bản đồ CARLA
+    # 4. Hiển thị 3D trên bản đồ CARLA (Làm sạch nét vẽ cũ để chống trùng 2 đường)
     print("\n--- HIỂN THỊ 3D TRÊN CARLA MAP ---")
     try:
-        carla = CarlaSimulator()
+        import math
+        sim = CarlaSimulator()
+        sim.clear_debug_drawings()
+
         x_traj = [wp[0] for wp in trajectory]
         y_traj = [wp[1] for wp in trajectory]
         theta_traj = [wp[2] for wp in trajectory]
-        carla.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=180.0)
-        print("[HOÀN THÀNH] Đã vẽ xong quỹ đạo lên CARLA 3D!")
+
+        yaw_deg = math.degrees(theta_traj[0])
+        sim.set_spectator(x=x_traj[0], y=y_traj[0], z=35.0, pitch=-75.0, yaw=yaw_deg)
+        sim.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=300.0)
+        print("[HOÀN THÀNH] Đã vẽ xong quỹ đạo duy nhất lên CARLA 3D!")
     except Exception as e:
         print(f"[CẢNH BÁO] Không thể vẽ 3D trên CARLA (Lỗi: {e}). File CSV đã được lưu thành công.")
 

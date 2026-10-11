@@ -13,11 +13,11 @@ except IndexError:
     pass
 
 import carla
-from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2
+from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2, CARLA_HOST, CARLA_PORT
 
 class CarlaSimulator:
-    def __init__(self, host='172.20.240.1', port=2000):
-        hosts_to_try = [host, '127.0.0.1', 'localhost']
+    def __init__(self, host=CARLA_HOST, port=CARLA_PORT):
+        hosts_to_try = [host, 'localhost', '127.0.0.1']
         self.client = None
         self.world = None
 
@@ -25,7 +25,7 @@ class CarlaSimulator:
             try:
                 print(f"[CARLA] Thử kết nối tới CARLA Server tại {h}:{port}...")
                 c = carla.Client(h, port)
-                c.set_timeout(3.0)
+                c.set_timeout(10.0)
                 w = c.get_world()
                 self.client = c
                 self.world = w
@@ -81,6 +81,26 @@ class CarlaSimulator:
         for vehicle in self.world.get_actors().filter('*vehicle*'):
             try:
                 vehicle.destroy()
+            except Exception:
+                pass
+
+    def clear_debug_drawings(self):
+        """Xóa toàn bộ các nét vẽ debug (đường quỹ đạo cũ) bằng cách reload world nhẹ"""
+        print("[CARLA] Đang làm sạch toàn bộ nét vẽ quỹ đạo và đối tượng cũ trên CARLA 3D...")
+        try:
+            self.clean()
+            # Tăng timeout lên 25s vì CARLA Server cần thời gian nạp lại bản đồ khi reload_world
+            self.client.set_timeout(25.0)
+            self.world = self.client.reload_world(False)
+            self.carla_map = self.world.get_map()
+            self.client.set_timeout(10.0)
+            print("[CARLA] Đã làm sạch bản đồ 3D thành công!")
+        except Exception as e:
+            print(f"[CARLA] Cảnh báo khi làm sạch bản đồ: {e}")
+            try:
+                self.client.set_timeout(10.0)
+                self.world = self.client.get_world()
+                self.carla_map = self.world.get_map()
             except Exception:
                 pass
 

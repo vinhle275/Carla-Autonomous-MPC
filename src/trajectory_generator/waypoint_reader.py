@@ -14,6 +14,7 @@ except IndexError:
     pass
 
 import carla
+from src.config import CARLA_HOST, CARLA_PORT
 
 class WaypointPicker:
     def __init__(self, carla_y_data, carla_x_data, invert_y=False, invert_x=False):
@@ -90,16 +91,16 @@ class WaypointPicker:
         plt.show()
         return self.clicked_points
 
-def get_2d_map_and_ping_waypoints(host='172.20.240.1', port=2000):
+def get_2d_map_and_ping_waypoints(host=CARLA_HOST, port=CARLA_PORT):
     client = None
-    hosts_to_try = [host, '127.0.0.1', 'localhost']
+    hosts_to_try = [host, 'localhost', '127.0.0.1']
     carla_map = None
 
     for h in hosts_to_try:
         try:
             print(f"[CARLA] Đang thử kết nối CARLA Server tại {h}:{port}...")
             c = carla.Client(h, port)
-            c.set_timeout(3.0)
+            c.set_timeout(10.0)
             world = c.get_world()
             carla_map = world.get_map()
             client = c

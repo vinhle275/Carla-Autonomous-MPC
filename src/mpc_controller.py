@@ -125,4 +125,9 @@ class MpcController:
         return wheel_angle_rad, acceleration_m_s_2
 
     def get_optimized_cost(self):
-        return float(self.sol.value(self.cost)) if self.sol else 0.0
+        if self.is_success and self.sol:
+            try:
+                return float(self.sol.value(self.cost))
+            except Exception:
+                return 0.0
+        return 0.0

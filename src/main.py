@@ -77,11 +77,12 @@ def main():
 
             # Chuyển đổi tín hiệu điều khiển góc lái và gia tốc
             wheel_angle_rad, acceleration_m_s_2 = mpc_controller.get_controls_value()
+            cost_val = mpc_controller.get_optimized_cost()
             throttle, brake, steer = CarlaSimulator.process_control_inputs(
                 wheel_angle_rad, acceleration_m_s_2, current_speed=v0
             )
 
-            logger.log_controller_output(steer, throttle, brake)
+            logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)
 
             # Đồng bộ thời gian thực bước sample dt

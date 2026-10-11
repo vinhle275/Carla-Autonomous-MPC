@@ -17,11 +17,27 @@ from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_
 
 class CarlaSimulator:
     def __init__(self, host='172.20.240.1', port=2000):
-        print(f"[CARLA] Kết nối tới CARLA Server tại {host}:{port}...")
-        self.client = carla.Client(host, port)
-        self.client.set_timeout(10.0)
-        self.world = self.client.get_world()
-        self.carla_map = self.world.get_map()
+        hosts_to_try = [host, '127.0.0.1', 'localhost']
+        self.client = None
+        self.world = None
+
+        for h in hosts_to_try:
+            try:
+                print(f"[CARLA] Thử kết nối tới CARLA Server tại {h}:{port}...")
+                c = carla.Client(h, port)
+                c.set_timeout(3.0)
+                w = c.get_world()
+                self.client = c
+                self.world = w
+                self.carla_map = self.world.get_map()
+                print(f"[CARLA] Kết nối thành công tới CARLA Server ({h}:{port})!")
+                break
+            except Exception:
+                continue
+
+        if self.client is None:
+            raise ConnectionError(f"Không thể kết nối tới CARLA Server tại các địa chỉ {hosts_to_try}:{port}!")
+
         self.ego_vehicle = None
         
         # Dọn dẹp các xe cũ nếu có

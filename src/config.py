@@ -10,7 +10,7 @@ PLOTS_DIR = os.path.abspath(
 )
 
 # --- VẬN TỐC THAM CHIẾU MONG MUỐN ---
-TARGET_SPEED_MS = 10.0       # Vận tốc mục tiêu (m/s) -> 10.0 m/s = 36.0 km/h
+TARGET_SPEED_MS = 10.0       # Vận tốc mục tiêu (m/s) -> 2 m/s
 OVERRIDE_V_REF = True        # Tự động nâng tốc độ trong CSV lên TARGET_SPEED_MS nhưng vẫn giữ giảm tốc an toàn khi vào cua
 
 # Vehicle characteristics (from CARLA simulator)

@@ -87,7 +87,7 @@ class CarlaSimulator:
                 debug.draw_arrow(loc, end_loc, thickness=0.05, arrow_size=0.15, color=carla.Color(255, 0, 0), life_time=life_time)
 
     def draw_horizon_path(self, x_ref, y_ref, life_time=0.2):
-        """Vẽ đoạn quỹ đạo N bước MPC đang nhìn thấy phía前 (đường đỏ)"""
+        """Vẽ đoạn quỹ đạo N bước MPC đang nhìn thấy phía trước (đường đỏ)"""
         debug = self.world.debug
         for i in range(len(x_ref) - 1):
             p1 = carla.Location(x=x_ref[i], y=y_ref[i], z=0.5)
@@ -110,11 +110,12 @@ class CarlaSimulator:
             self.ego_vehicle.apply_control(carla.VehicleControl(throttle=throttle, steer=steer, brake=brake))
 
     @staticmethod
-    def process_control_inputs(wheel_angle_rad, acceleration_m_s_2):
-        if acceleration_m_s_2 == 0:
-            throttle = 0.0
-            brake = 0.0
-        elif acceleration_m_s_2 < 0:
+    def process_control_inputs(wheel_angle_rad, acceleration_m_s_2, current_speed=0.0):
+        # Chống trượt bánh (Traction Control) khi vừa khởi động từ tốc độ 0
+        if current_speed < 1.5:
+            acceleration_m_s_2 = min(acceleration_m_s_2, 2.5)  # Khởi động mềm gia tốc max 2.5 m/s^2
+
+        if acceleration_m_s_2 <= 0:
             throttle = 0.0
             brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
         else:

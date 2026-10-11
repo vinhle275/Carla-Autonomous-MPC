@@ -1,11 +1,17 @@
 import os
 import csv
 import numpy as np
-from src.config import N, TRAJECTORY_CSV_PATH
+import math
+from src.config import N, dt, TRAJECTORY_CSV_PATH, TARGET_SPEED_MS, OVERRIDE_V_REF
+
+def normalize_angle(angle):
+    """Chuẩn hóa góc về dải [-pi, pi]"""
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 def load_csv_trajectory(filepath=None):
     """
     Đọc file CSV chứa quỹ đạo tham chiếu (x, y, theta_rad, v_m_s).
+    Áp dụng np.unwrap để làm mịn góc hướng theta.
     """
     if filepath is None:
         filepath = TRAJECTORY_CSV_PATH
@@ -27,8 +33,21 @@ def load_csv_trajectory(filepath=None):
             theta_traj.append(float(row['theta_rad']))
             v_ref.append(float(row['v_m_s']))
 
+    x_traj = np.array(x_traj)
+    y_traj = np.array(y_traj)
+    theta_traj = np.unwrap(np.array(theta_traj))  # Khắc phục lỗi nhảy góc +-pi
+    v_ref = np.array(v_ref)
+    
+    # Nâng tốc độ tham chiếu lên TARGET_SPEED_MS nếu OVERRIDE_V_REF được bật
+    if OVERRIDE_V_REF and len(v_ref) > 0:
+        max_v = np.max(v_ref)
+        if max_v > 0:
+            scale_factor = TARGET_SPEED_MS / max_v
+            v_ref = v_ref * scale_factor
+            print(f"[SPEED UP] Đã tự động nâng vận tốc tối đa trong file CSV lên {TARGET_SPEED_MS:.1f} m/s ({TARGET_SPEED_MS * 3.6:.1f} km/h).")
+
     print(f"[LOAD TRAJECTORY] Đã tải thành công {len(x_traj)} waypoints từ: {filepath}")
-    return np.array(x_traj), np.array(y_traj), np.array(theta_traj), np.array(v_ref)
+    return x_traj, y_traj, theta_traj, v_ref
 
 def update_reference_point(x0, y0, current_idx, x_traj, y_traj, search_range=50):
     """
@@ -55,13 +74,22 @@ def update_reference_point(x0, y0, current_idx, x_traj, y_traj, search_range=50)
 
 def get_ref_trajectory(x_traj, y_traj, theta_traj, v_traj, current_idx):
     """
-    Trích xuất N waypoint dự báo phía trước tính từ current_idx cho bộ điều khiển MPC.
+    Trích xuất N waypoint dự báo phía trước tính từ current_idx dựa trên khoảng cách di chuyển không gian thực tế (v * dt).
+    Khớp tầm nhìn MPC với tốc độ di chuyển để triệt tiêu chao đảo lắc trái/phải.
     """
     total_points = len(x_traj)
     x_ref, y_ref, theta_ref, v_ref = [], [], [], []
 
-    for i in range(N):
-        idx = min(current_idx + i, total_points - 1)
+    # Tốc độ tham chiếu hiện tại tại vị trí xe
+    current_v = max(float(v_traj[current_idx]), 2.0)
+    
+    # Khoảng cách xe đi được trong 1 bước dt = 0.1s
+    step_dist = current_v * dt
+    # Mỗi waypoint trong CSV cách nhau khoảng DS = 0.1m
+    idx_step = max(1, int(round(step_dist / 0.1)))
+
+    for k in range(N):
+        idx = min(current_idx + k * idx_step, total_points - 1)
         x_ref.append(x_traj[idx])
         y_ref.append(y_traj[idx])
         theta_ref.append(theta_traj[idx])

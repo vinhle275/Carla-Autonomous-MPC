@@ -47,7 +47,7 @@ class MpcController:
     def update_cost_function(self, x_ref, y_ref, theta_ref, v_ref):
         self.cost = 0
         
-        # Thiết lập giá trị dự đoán ban đầu (Warm Start) cho IPOPT để giải cực nhanh
+        # Thiết lập giá trị dự đoán ban đầu (Warm Start) cho IPOPT
         for k in range(self.horizon):
             v_k = v_ref[k] if hasattr(v_ref, '__len__') else v_ref
             self.opti.set_initial(self.X[0, k], x_ref[k])
@@ -58,15 +58,15 @@ class MpcController:
         for k in range(self.horizon):
             v_k = v_ref[k] if hasattr(v_ref, '__len__') else v_ref
 
-            # 1. Sai số vị trí X và Y (Hàm trơn nhẵn Quadratic, không tạo Deadzone)
+            # 1. Sai số vị trí X và Y (Hàm trơn nhẵn Quadratic)
             fine_x = FINE_X_COEF * (self.X[0, k] - x_ref[k]) ** 2
             fine_y = FINE_Y_COEF * (self.X[1, k] - y_ref[k]) ** 2
 
             # 2. Sai số vận tốc V
             fine_v = FINE_V_COEF * (self.X[3, k] - v_k) ** 2
 
-            # 3. Sai số góc hướng Theta (Dùng sin^2 để tránh lỗi nhảy góc khi tiệm cận +-pi)
-            fine_theta = FINE_THETA_COEF * (ca.sin(self.X[2, k] - theta_ref[k])) ** 2
+            # 3. Sai số góc hướng Theta (Dùng trực tiếp góc unwrapped continuous)
+            fine_theta = FINE_THETA_COEF * (self.X[2, k] - theta_ref[k]) ** 2
 
             # 4. Độ lệch ngang vuông góc với quỹ đạo (Lateral Deviation)
             if k < self.horizon - 1:

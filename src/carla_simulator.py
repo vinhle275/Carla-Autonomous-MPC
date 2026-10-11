@@ -13,15 +13,31 @@ except IndexError:
     pass
 
 import carla
-from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2
+from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2, CARLA_HOST, CARLA_PORT
 
 class CarlaSimulator:
-    def __init__(self, host='172.20.240.1', port=2000):
-        print(f"[CARLA] Kết nối tới CARLA Server tại {host}:{port}...")
-        self.client = carla.Client(host, port)
-        self.client.set_timeout(10.0)
-        self.world = self.client.get_world()
-        self.carla_map = self.world.get_map()
+    def __init__(self, host=CARLA_HOST, port=CARLA_PORT):
+        hosts_to_try = [host, 'localhost', '127.0.0.1']
+        self.client = None
+        self.world = None
+
+        for h in hosts_to_try:
+            try:
+                print(f"[CARLA] Thử kết nối tới CARLA Server tại {h}:{port}...")
+                c = carla.Client(h, port)
+                c.set_timeout(10.0)
+                w = c.get_world()
+                self.client = c
+                self.world = w
+                self.carla_map = self.world.get_map()
+                print(f"[CARLA] Kết nối thành công tới CARLA Server ({h}:{port})!")
+                break
+            except Exception:
+                continue
+
+        if self.client is None:
+            raise ConnectionError(f"Không thể kết nối tới CARLA Server tại các địa chỉ {hosts_to_try}:{port}!")
+
         self.ego_vehicle = None
         
         # Dọn dẹp các xe cũ nếu có
@@ -39,28 +55,19 @@ class CarlaSimulator:
         blueprint_library = self.world.get_blueprint_library()
         vehicle_bp = blueprint_library.filter(vehicle_name)[0]
 
-        # Tìm waypoint gần nhất trên mặt đường để xác định độ cao Z chuẩn và tránh va chạm vách
+        # Đặt xe CHÍNH XÁC tại vị trí waypoint xuất phát (x, y), lấy độ cao Z từ mặt đường
         wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
-        if wp:
-            # Ưu tiên lấy vị trí chuẩn trên làn đường để tránh spawn đâm vào vỉa hè/tường
-            spawn_x = wp.transform.location.x
-            spawn_y = wp.transform.location.y
-            spawn_z = wp.transform.location.z + 1.0  # Nâng cao 1.0m để xe rơi nhẹ xuống đường, tránh lún bánh
-            if yaw_rad is None or yaw_rad == 0.0:
-                yaw_deg = wp.transform.rotation.yaw
-            else:
-                yaw_deg = np.rad2deg(yaw_rad)
-        else:
-            spawn_x, spawn_y = x, y
-            spawn_z = 1.0 if z is None else z + 1.0
-            yaw_deg = np.rad2deg(yaw_rad)
+        spawn_x = x
+        spawn_y = y
+        spawn_z = (wp.transform.location.z + 0.5) if wp else (0.5 if z is None else z + 0.5)
+        yaw_deg = np.rad2deg(yaw_rad)
 
         spawn_location = carla.Location(x=spawn_x, y=spawn_y, z=spawn_z)
         spawn_rotation = carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
         spawn_transform = carla.Transform(location=spawn_location, rotation=spawn_rotation)
 
         self.ego_vehicle = self.world.spawn_actor(vehicle_bp, spawn_transform)
-        print(f"[CARLA] Đã tạo xe {vehicle_name} tại tọa độ x={spawn_x:.2f}, y={spawn_y:.2f}, z={spawn_z:.2f}, yaw={yaw_deg:.1f}°")
+        print(f"[CARLA] Đã tạo xe {vehicle_name} tại đúng điểm bắt đầu x={spawn_x:.2f}, y={spawn_y:.2f}, z={spawn_z:.2f}, yaw={yaw_deg:.1f}°")
         return self.ego_vehicle
 
     def set_spectator(self, x=0.0, y=0.0, z=30.0, pitch=-60.0, yaw=0.0):
@@ -77,8 +84,28 @@ class CarlaSimulator:
             except Exception:
                 pass
 
+    def clear_debug_drawings(self):
+        """Xóa toàn bộ các nét vẽ debug (đường quỹ đạo cũ) bằng cách reload world nhẹ"""
+        print("[CARLA] Đang làm sạch toàn bộ nét vẽ quỹ đạo và đối tượng cũ trên CARLA 3D...")
+        try:
+            self.clean()
+            # Tăng timeout lên 25s vì CARLA Server cần thời gian nạp lại bản đồ khi reload_world
+            self.client.set_timeout(25.0)
+            self.world = self.client.reload_world(False)
+            self.carla_map = self.world.get_map()
+            self.client.set_timeout(10.0)
+            print("[CARLA] Đã làm sạch bản đồ 3D thành công!")
+        except Exception as e:
+            print(f"[CARLA] Cảnh báo khi làm sạch bản đồ: {e}")
+            try:
+                self.client.set_timeout(10.0)
+                self.world = self.client.get_world()
+                self.carla_map = self.world.get_map()
+            except Exception:
+                pass
+
     def draw_full_trajectory_3d(self, x_traj, y_traj, theta_traj=None, life_time=300.0):
-        """Vẽ toàn bộ quỹ đạo 001 lên không gian 3D của CARLA."""
+        """Vẽ toàn bộ quỹ đạo lên không gian 3D của CARLA."""
         debug = self.world.debug
         last_z = 0.5
         for i in range(len(x_traj)):
@@ -119,11 +146,12 @@ class CarlaSimulator:
             self.ego_vehicle.apply_control(carla.VehicleControl(throttle=throttle, steer=steer, brake=brake))
 
     @staticmethod
-    def process_control_inputs(wheel_angle_rad, acceleration_m_s_2):
-        if acceleration_m_s_2 == 0:
-            throttle = 0.0
-            brake = 0.0
-        elif acceleration_m_s_2 < 0:
+    def process_control_inputs(wheel_angle_rad, acceleration_m_s_2, current_speed=0.0):
+        # Chống trượt bánh (Traction Control) khi vừa khởi động từ tốc độ 0
+        if current_speed < 1.5:
+            acceleration_m_s_2 = min(acceleration_m_s_2, 2.5)  # Khởi động mềm gia tốc max 2.5 m/s^2
+
+        if acceleration_m_s_2 <= 0:
             throttle = 0.0
             brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
         else:

@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.carla_simulator import CarlaSimulator
 from src.config import N, dt
-from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory
+from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
 from src.mpc_controller import MpcController
 
@@ -18,12 +18,12 @@ def main():
     print("   CARLA AUTONOMOUS MPC - PATH TRACKING (001 TRAJECTORY)   ")
     print("==========================================================")
 
-    # 1. Tải quỹ đạo từ file CSV
+    # 1. Tải quỹ đạo từ file CSV (đã áp dụng np.unwrap cho góc theta)
     x_traj, y_traj, theta_traj, v_ref_traj = load_csv_trajectory()
     total_waypoints = len(x_traj)
 
-    # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát
-    carla = CarlaSimulator(host='172.20.240.1', port=2000)
+    # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát (đọc host từ config.py)
+    carla = CarlaSimulator()
     
     x_init = x_traj[0]
     y_init = y_traj[0]
@@ -51,14 +51,19 @@ def main():
             mpc_controller.reset_solver()
 
             # Lấy trạng thái hiện tại của xe từ CARLA
-            x0, y0, theta0, v0 = carla.get_main_ego_vehicle_state()
-            mpc_controller.set_init_vehicle_state(x0, y0, theta0, v0)
+            x0, y0, theta0_raw, v0 = carla.get_main_ego_vehicle_state()
 
             # Cập nhật chỉ số waypoint gần nhất
             current_idx = update_reference_point(x0, y0, current_idx, x_traj, y_traj)
 
             # Trích xuất đoạn quỹ đạo tham chiếu N bước phía trước
             x_ref, y_ref, theta_ref, v_ref = get_ref_trajectory(x_traj, y_traj, theta_traj, v_ref_traj, current_idx)
+
+            # Khắc phục lỗi nhảy góc +-pi: Chuẩn hóa theta0 trùng nhánh góc liên tục với theta_ref[0]
+            theta0 = theta_ref[0] + normalize_angle(theta0_raw - theta_ref[0])
+
+            # Thiết lập trạng thái ban đầu cho MPC
+            mpc_controller.set_init_vehicle_state(x0, y0, theta0, v0)
 
             # Vẽ đường dự báo MPC N bước (đường đỏ)
             carla.draw_horizon_path(x_ref, y_ref, life_time=dt * 2)
@@ -72,9 +77,12 @@ def main():
 
             # Chuyển đổi tín hiệu điều khiển góc lái và gia tốc
             wheel_angle_rad, acceleration_m_s_2 = mpc_controller.get_controls_value()
-            throttle, brake, steer = CarlaSimulator.process_control_inputs(wheel_angle_rad, acceleration_m_s_2)
+            cost_val = mpc_controller.get_optimized_cost()
+            throttle, brake, steer = CarlaSimulator.process_control_inputs(
+                wheel_angle_rad, acceleration_m_s_2, current_speed=v0
+            )
 
-            logger.log_controller_output(steer, throttle, brake)
+            logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)
 
             # Đồng bộ thời gian thực bước sample dt

@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.trajectory_generator.waypoint_reader import get_2d_map_and_ping_waypoints
 from src.trajectory_generator.spline_gen import generate_trajectory
 from src.carla_simulator import CarlaSimulator
-from src.config import TRAJECTORY_CSV_PATH
+from src.config import TRAJECTORY_CSV_PATH, TARGET_SPEED_MS
 
 def save_waypoints_to_csv(waypoints, filename):
     """Ghi danh sách waypoint ra file CSV"""
@@ -32,22 +32,28 @@ def main():
         print("Bạn chưa chọn đủ điểm. Thao tác bị hủy!")
         return
 
-    # 2. Nội suy quỹ đạo PCHIP
-    print("\n--- TÍNH TOÁN QUỸ ĐẠO PCHIP ---")
-    trajectory = generate_trajectory(x_anchors, y_anchors, ds=0.1, v_max=2.0, a_lat_max=1.5)
+    # 2. Nội suy quỹ đạo PCHIP với vận tốc mục tiêu TARGET_SPEED_MS
+    print(f"\n--- TÍNH TOÁN QUỸ ĐẠO PCHIP (V_MAX = {TARGET_SPEED_MS:.1f} m/s) ---")
+    trajectory = generate_trajectory(x_anchors, y_anchors, ds=0.1, v_max=TARGET_SPEED_MS, a_lat_max=3.0)
 
     # 3. Ghi dữ liệu ra CSV trong thư mục data/
     save_waypoints_to_csv(trajectory, TRAJECTORY_CSV_PATH)
 
-    # 4. Hiển thị 3D trên bản đồ CARLA
+    # 4. Hiển thị 3D trên bản đồ CARLA (Làm sạch nét vẽ cũ để chống trùng 2 đường)
     print("\n--- HIỂN THỊ 3D TRÊN CARLA MAP ---")
     try:
-        carla = CarlaSimulator()
+        import math
+        sim = CarlaSimulator()
+        sim.clear_debug_drawings()
+
         x_traj = [wp[0] for wp in trajectory]
         y_traj = [wp[1] for wp in trajectory]
         theta_traj = [wp[2] for wp in trajectory]
-        carla.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=180.0)
-        print("[HOÀN THÀNH] Đã vẽ xong quỹ đạo lên CARLA 3D!")
+
+        yaw_deg = math.degrees(theta_traj[0])
+        sim.set_spectator(x=x_traj[0], y=y_traj[0], z=35.0, pitch=-75.0, yaw=yaw_deg)
+        sim.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=300.0)
+        print("[HOÀN THÀNH] Đã vẽ xong quỹ đạo duy nhất lên CARLA 3D!")
     except Exception as e:
         print(f"[CẢNH BÁO] Không thể vẽ 3D trên CARLA (Lỗi: {e}). File CSV đã được lưu thành công.")
 

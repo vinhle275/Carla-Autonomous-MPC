@@ -1,8 +1,9 @@
 import casadi as ca
+import numpy as np
 from src.help_functions import calculate_lateral_deviation
 from src.config import (
     MAX_CONTROL_WHEEL_ANGLE_RAD, MAX_CONTROL_ACCELERATION_M_S_2, MAX_CONTROL_BRAKING_M_S_2,
-    PATH_TOLERANCE_M, FINE_X_COEF, FINE_Y_COEF, FINE_V_COEF, FINE_STEER_COEF, FINE_ACC_COEF,
+    FINE_X_COEF, FINE_Y_COEF, FINE_V_COEF, FINE_STEER_COEF, FINE_ACC_COEF,
     FINE_STEER_DOT_COEF, FINE_ACC_DOT_COEF, FINE_THETA_COEF, FINE_LATERAL_COEF
 )
 from src.vehicle_model import vehicle_model
@@ -45,22 +46,29 @@ class MpcController:
 
     def update_cost_function(self, x_ref, y_ref, theta_ref, v_ref):
         self.cost = 0
+        
+        # Thiết lập giá trị dự đoán ban đầu (Warm Start) cho IPOPT
         for k in range(self.horizon):
-            # Safe indexing for speed reference
+            v_k = v_ref[k] if hasattr(v_ref, '__len__') else v_ref
+            self.opti.set_initial(self.X[0, k], x_ref[k])
+            self.opti.set_initial(self.X[1, k], y_ref[k])
+            self.opti.set_initial(self.X[2, k], theta_ref[k])
+            self.opti.set_initial(self.X[3, k], v_k)
+
+        for k in range(self.horizon):
             v_k = v_ref[k] if hasattr(v_ref, '__len__') else v_ref
 
-            fine_x = ca.if_else(ca.fabs(self.X[0, k] - x_ref[k]) > PATH_TOLERANCE_M,
-                                FINE_X_COEF * (self.X[0, k] - x_ref[k]) ** 2, 0)
-            fine_y = ca.if_else(ca.fabs(self.X[1, k] - y_ref[k]) > PATH_TOLERANCE_M,
-                                FINE_Y_COEF * (self.X[1, k] - y_ref[k]) ** 2, 0)
-            fine_v = FINE_V_COEF * (self.X[3, k] - v_k) ** 2
-            fine_steer = FINE_STEER_COEF * self.U[0, k] ** 2
-            fine_acc = FINE_ACC_COEF * self.U[1, k] ** 2
+            # 1. Sai số vị trí X và Y (Hàm trơn nhẵn Quadratic)
+            fine_x = FINE_X_COEF * (self.X[0, k] - x_ref[k]) ** 2
+            fine_y = FINE_Y_COEF * (self.X[1, k] - y_ref[k]) ** 2
 
-            # Heading theta error
+            # 2. Sai số vận tốc V
+            fine_v = FINE_V_COEF * (self.X[3, k] - v_k) ** 2
+
+            # 3. Sai số góc hướng Theta (Dùng trực tiếp góc unwrapped continuous)
             fine_theta = FINE_THETA_COEF * (self.X[2, k] - theta_ref[k]) ** 2
 
-            # Lateral error relative to reference path segment
+            # 4. Độ lệch ngang vuông góc với quỹ đạo (Lateral Deviation)
             if k < self.horizon - 1:
                 lateral_dev = calculate_lateral_deviation(
                     self.X[0, k], self.X[1, k],
@@ -70,14 +78,18 @@ class MpcController:
             else:
                 lateral_dev = 0.0
 
-            fine_lateral = FINE_LATERAL_COEF * lateral_dev ** 2
+            fine_lateral = FINE_LATERAL_COEF * (lateral_dev ** 2)
 
-            # Smooth control rate penalties
+            # 5. Phạt biên độ điều khiển
+            fine_steer = FINE_STEER_COEF * (self.U[0, k] ** 2)
+            fine_acc = FINE_ACC_COEF * (self.U[1, k] ** 2)
+
+            # 6. Phạt tốc độ thay đổi góc lái & gia tốc (Smooth control action)
             fine_steer_dot = 0
             fine_acc_dot = 0
             if k > 0:
-                fine_steer_dot = FINE_STEER_DOT_COEF * (self.U[0, k] - self.U[0, k - 1]) ** 2
-                fine_acc_dot = FINE_ACC_DOT_COEF * (self.U[1, k] - self.U[1, k - 1]) ** 2
+                fine_steer_dot = FINE_STEER_DOT_COEF * ((self.U[0, k] - self.U[0, k - 1]) ** 2)
+                fine_acc_dot = FINE_ACC_DOT_COEF * ((self.U[1, k] - self.U[1, k - 1]) ** 2)
 
             self.cost += (fine_x + fine_y + fine_v + fine_steer + fine_acc +
                           fine_steer_dot + fine_acc_dot + fine_theta + fine_lateral)
@@ -113,4 +125,9 @@ class MpcController:
         return wheel_angle_rad, acceleration_m_s_2
 
     def get_optimized_cost(self):
-        return float(self.sol.value(self.cost)) if self.sol else 0.0
+        if self.is_success and self.sol:
+            try:
+                return float(self.sol.value(self.cost))
+            except Exception:
+                return 0.0
+        return 0.0

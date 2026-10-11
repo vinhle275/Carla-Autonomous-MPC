@@ -14,6 +14,7 @@ except IndexError:
     pass
 
 import carla
+from src.config import CARLA_HOST, CARLA_PORT
 
 class WaypointPicker:
     def __init__(self, carla_y_data, carla_x_data, invert_y=False, invert_x=False):
@@ -22,8 +23,8 @@ class WaypointPicker:
         self.carla_x_data = carla_x_data
         
         self.fig, self.ax = plt.subplots(figsize=(10, 8))
-        self.ax.scatter(carla_y_data, carla_x_data, s=1, c='gray', label='Road Network')
-        self.ax.set_title("Bản đồ 2D MPC - Chọn điểm neo (Anchor Points)")
+        self.ax.scatter(carla_y_data, carla_x_data, s=1, c='gray', label='Road Network (Tâm đường)')
+        self.ax.set_title("Bản đồ 2D MPC - Chọn điểm neo (Tự động bắt vào tâm đường ô xám)")
         self.ax.set_xlabel("Trục Ngang (CARLA Y)")
         self.ax.set_ylabel("Trục Dọc (CARLA X)")
         self.ax.axis('equal')
@@ -47,10 +48,11 @@ class WaypointPicker:
         if self.fig.canvas.toolbar.mode != "":
             return
             
-        # Chuột trái (Button 1): Chấm điểm neo
+        # Chuột trái (Button 1): Chấm điểm neo (TỰ ĐỘNG BẮT ĐIỂM VÀO TÂM ĐƯỜNG Ô XÁM GẦN NHẤT)
         if event.button == 1:
             click_y, click_x = event.xdata, event.ydata
             
+            # Quét tìm điểm xám gần vị trí click nhất
             min_dist = float('inf')
             closest_y, closest_x = click_y, click_x
             for y, x in zip(self.carla_y_data, self.carla_x_data):
@@ -60,6 +62,7 @@ class WaypointPicker:
                     closest_y = y
                     closest_x = x
                     
+            # Tránh double-click tạo ra 2 điểm trùng nhau liên tiếp
             if self.clicked_points and self.clicked_points[-1] == (closest_y, closest_x):
                 return
             
@@ -88,24 +91,38 @@ class WaypointPicker:
         plt.show()
         return self.clicked_points
 
-def get_2d_map_and_ping_waypoints(host='172.20.240.1', port=2000):
-    print("[CARLA] Đang kết nối với CARLA Server để đọc bản đồ...")
-    client = carla.Client(host, port)
-    client.set_timeout(10.0)
-    world = client.get_world()
-    carla_map = world.get_map()
+def get_2d_map_and_ping_waypoints(host=CARLA_HOST, port=CARLA_PORT):
+    client = None
+    hosts_to_try = [host, 'localhost', '127.0.0.1']
+    carla_map = None
 
-    print("[CARLA] Đang trích xuất dữ liệu bản đồ 2D...")
+    for h in hosts_to_try:
+        try:
+            print(f"[CARLA] Đang thử kết nối CARLA Server tại {h}:{port}...")
+            c = carla.Client(h, port)
+            c.set_timeout(10.0)
+            world = c.get_world()
+            carla_map = world.get_map()
+            client = c
+            print(f"[CARLA] Kết nối thành công tới {h}:{port}!")
+            break
+        except Exception:
+            continue
+
+    if carla_map is None:
+        raise ConnectionError(f"Không thể kết nối đến CARLA Server tại các địa chỉ {hosts_to_try}:{port}!")
+
+    print("[CARLA] Đang trích xuất dữ liệu bản đồ 2D (Tâm các làn đường)...")
     waypoints = carla_map.generate_waypoints(distance=2.0)
     
     carla_y_data = [w.transform.location.y for w in waypoints]
     carla_x_data = [w.transform.location.x for w in waypoints]
 
-    print("\n================ [HƯỚNG DẪN BẢN ĐỒ 2D] ================")
-    print("- Click chuột trái để chấm điểm neo.")
-    print("- Click chuột phải để xóa điểm neo (Undo).")
-    print("- Bấm phím ENTER để kết thúc chọn và xuất tọa độ.")
-    print("========================================================\n")
+    print("\n================ [HƯỚNG DẪN BẢN ĐỒ 2D MPC] ================")
+    print("- Click chuột trái: Điểm neo TỰ ĐỘNG BẮT VÀO TÂM ĐƯỜNG (Ô XÁM).")
+    print("- Click chuột phải: Xóa điểm vừa chọn (Undo).")
+    print("- Bấm phím ENTER: Hoàn tất và xuất tọa độ.")
+    print("============================================================\n")
 
     picker = WaypointPicker(carla_y_data, carla_x_data)
     clicked_points = picker.get_points()
@@ -113,5 +130,5 @@ def get_2d_map_and_ping_waypoints(host='172.20.240.1', port=2000):
     x_anchors = [round(float(y), 2) for (x, y) in clicked_points]
     y_anchors = [round(float(x), 2) for (x, y) in clicked_points]
     
-    print(f"[XONG] Đã chọn {len(x_anchors)} điểm neo.")
+    print(f"[XONG] Đã chọn {len(x_anchors)} điểm neo (Đã chuẩn hóa về tâm đường).")
     return x_anchors, y_anchors

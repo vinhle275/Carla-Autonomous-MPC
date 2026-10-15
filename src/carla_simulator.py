@@ -77,10 +77,15 @@ class CarlaSimulator:
         spectator.set_transform(carla.Transform(location, rotation))
 
     def clean(self):
-        print("[CARLA] Đang dọn dẹp các actor xe...")
-        for vehicle in self.world.get_actors().filter('*vehicle*'):
+        print("[CARLA] Đang dọn dẹp các actor xe và vật cản...")
+        for actor in self.world.get_actors().filter('*vehicle*'):
             try:
-                vehicle.destroy()
+                actor.destroy()
+            except Exception:
+                pass
+        for prop in self.world.get_actors().filter('*static.prop*'):
+            try:
+                prop.destroy()
             except Exception:
                 pass
 
@@ -153,7 +158,11 @@ class CarlaSimulator:
 
         if acceleration_m_s_2 <= 0:
             throttle = 0.0
-            brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
+            # Khi xe đang đi chậm (current_speed < 2.5 m/s), không phanh quá gắt làm xe bị dính bánh chết máy
+            if current_speed < 2.5:
+                brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 0.15)
+            else:
+                brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
         else:
             throttle = min(acceleration_m_s_2 / MAX_ACCELERATION_M_S_2, 1.0)
             brake = 0.0

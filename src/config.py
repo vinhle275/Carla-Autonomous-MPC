@@ -46,6 +46,7 @@ FINE_ACC_DOT_COEF = 10.0     # Phạt giật ga/phanh
 # ==============================================================================
 # --- CẤU HÌNH SINH VẬT CẢN (OBSTACLE GENERATION) ---
 # ==============================================================================
+ENABLE_OBSTACLES = False              # True: Tự động sinh vật cản; False: Chế độ thuần bám quỹ đạo (không sinh vật cản)
 OBSTACLE_START_TRAJECTORY_FRACTION = 1.0 / 3.0   # Bắt đầu xuất hiện từ 1/3 quỹ đạo trở đi
 OBSTACLE_END_TRAJECTORY_FRACTION = 0.95          # Giới hạn kết thúc sinh vật cản (trước 5% cuối)
 OBSTACLE_MIN_DISTANCE_M = 50.0                   # Khoảng cách tối thiểu giữa 2 vật cản liên tiếp (m)

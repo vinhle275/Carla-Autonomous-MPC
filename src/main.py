@@ -8,7 +8,7 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.carla_simulator import CarlaSimulator
-from src.config import N, dt, USE_LINEARIZED_QP_MPC
+from src.config import N, dt, USE_LINEARIZED_QP_MPC, ENABLE_OBSTACLES
 from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
 from src.mpc_controller import MpcController
@@ -17,6 +17,18 @@ from src.obstacle_detector import ObstacleDetector
 from src.create_obstacles.obstacle_generator import ObstacleManager
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="CARLA Autonomous MPC Path Tracking")
+    parser.add_argument('--no-obstacles', action='store_true', help="Chạy chế độ thuần bám quỹ đạo (tắt sinh vật cản)")
+    parser.add_argument('--with-obstacles', action='store_true', help="Bật sinh vật cản né (ghi đè config.py)")
+    args, unknown = parser.parse_known_args()
+
+    enable_obstacles = ENABLE_OBSTACLES
+    if args.no_obstacles:
+        enable_obstacles = False
+    elif args.with_obstacles:
+        enable_obstacles = True
+
     print("==========================================================")
     print("   CARLA AUTONOMOUS MPC - PATH TRACKING & OBSTACLES       ")
     print("==========================================================")
@@ -35,9 +47,14 @@ def main():
     carla.spawn_ego_vehicle('vehicle.tesla.model3', x=x_init, y=y_init, yaw_rad=yaw_init)
     carla.set_spectator(x=x_init, y=y_init, z=35.0, pitch=-75.0, yaw=0.0)
 
-    # 3. Sinh các vật cản tĩnh trên môi trường (từ 1/3 quỹ đạo trở đi)
-    obstacle_manager = ObstacleManager(carla_sim=carla)
-    obstacle_manager.generate_obstacles(x_traj, y_traj, theta_traj)
+    # 3. Sinh các vật cản tĩnh trên môi trường (nếu được kích hoạt)
+    obstacle_manager = None
+    if enable_obstacles:
+        print("[CHẾ ĐỘ] Kích hoạt sinh vật cản né (Obstacle Avoidance Mode).")
+        obstacle_manager = ObstacleManager(carla_sim=carla)
+        obstacle_manager.generate_obstacles(x_traj, y_traj, theta_traj)
+    else:
+        print("[CHẾ ĐỘ] Chạy THUẦN BÁM QUỸ ĐẠO (Pure Path Tracking - Không sinh vật cản).")
 
     # 4. Khởi tạo Cảm biến nhận thức ảo (Obstacle Detector) gắn trên xe Ego
     obstacle_detector = ObstacleDetector(carla.world, carla.ego_vehicle)
@@ -136,7 +153,8 @@ def main():
         traceback.print_exc()
     finally:
         print("\n[HOÀN THÀNH] Kết thúc mô phỏng.")
-        obstacle_manager.destroy_all()
+        if obstacle_manager is not None:
+            obstacle_manager.destroy_all()
         carla.clean()
         logger.show_plots()
 

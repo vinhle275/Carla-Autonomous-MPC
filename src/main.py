@@ -8,18 +8,19 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.carla_simulator import CarlaSimulator
-from src.config import N, dt
-from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
+from src.config import N, dt, OBSTACLE_SIZE
+from src.help_functions import load_csv_trajectory, load_csv_obstacles, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
 from src.mpc_controller import MpcController
 
 def main():
     print("==========================================================")
-    print("   CARLA AUTONOMOUS MPC - PATH TRACKING (001 TRAJECTORY)   ")
+    print("   CARLA AUTONOMOUS MPC - PATH TRACKING & OBSTACLES      ")
     print("==========================================================")
 
-    # 1. Tải quỹ đạo từ file CSV (đã áp dụng np.unwrap cho góc theta)
+    # 1. Tải quỹ đạo và danh sách vật cản từ file CSV
     x_traj, y_traj, theta_traj, v_ref_traj = load_csv_trajectory()
+    obstacles = load_csv_obstacles()
     total_waypoints = len(x_traj)
 
     # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát (đọc host từ config.py)
@@ -30,11 +31,15 @@ def main():
     yaw_init = theta_traj[0]
 
     carla.spawn_ego_vehicle('vehicle.tesla.model3', x=x_init, y=y_init, yaw_rad=yaw_init)
-    carla.set_spectator(x=x_init, y=y_init, z=35.0, pitch=-75.0, yaw=0.0)
+    carla.follow_ego_vehicle(distance=7.5, height=3.5, pitch=-15.0)
 
-    # 3. Vẽ toàn bộ quỹ đạo 3D lên CARLA (điểm xanh lá + mũi tên đỏ)
-    print("[CARLA] Đang hiển thị quỹ đạo 3D lên bản đồ...")
+    # 3. Vẽ toàn bộ quỹ đạo 3D và các vật cản (0.5x0.5m) lên CARLA
+    print("[CARLA] Đang hiển thị quỹ đạo 3D và các vật cản lên bản đồ...")
     carla.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=300.0)
+
+    # Spawn các vật cản mà bạn đã click chọn từ file generate_path.py
+    for obs in obstacles:
+        carla.spawn_static_box_obstacle(obs['x'], obs['y'], size=obs.get('size', OBSTACLE_SIZE))
 
     # 4. Khởi tạo MPC Controller & Logger
     mpc_controller = MpcController(horizon=N, dt=dt)
@@ -68,9 +73,16 @@ def main():
             # Vẽ đường dự báo MPC N bước (đường đỏ)
             carla.draw_horizon_path(x_ref, y_ref, life_time=dt * 2)
 
-            # Ghi Log & Cập nhật hàm chi phí bài toán tối ưu
+            # Lọc các vật cản ở gần xe Ego (trong bán kính 25m) để đưa vào MPC
+            nearby_obstacles = []
+            for obs in obstacles:
+                dist_to_obs = np.sqrt((x0 - obs['x'])**2 + (y0 - obs['y'])**2)
+                if dist_to_obs <= 25.0:
+                    nearby_obstacles.append(obs)
+
+            # Ghi Log & Cập nhật hàm chi phí bài toán tối ưu (có né vật cản hàm mũ)
             logger.log_controller_input(x0, y0, v0, theta0, x_ref[0], y_ref[0], v_ref[0], theta_ref[0])
-            mpc_controller.update_cost_function(x_ref, y_ref, theta_ref, v_ref)
+            mpc_controller.update_cost_function(x_ref, y_ref, theta_ref, v_ref, obstacles=nearby_obstacles)
 
             # Giải bài toán tối ưu MPC
             mpc_controller.solve()
@@ -84,6 +96,9 @@ def main():
 
             logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)
+
+            # Camera Spectator tự động bám theo sau xe khi xe đang chạy
+            carla.follow_ego_vehicle(distance=7.5, height=3.5, pitch=-15.0)
 
             # Đồng bộ thời gian thực bước sample dt
             calc_time = time.time() - start_time

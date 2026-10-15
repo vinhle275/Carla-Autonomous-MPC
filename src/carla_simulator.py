@@ -76,11 +76,50 @@ class CarlaSimulator:
         rotation = carla.Rotation(pitch=pitch, yaw=yaw, roll=0.0)
         spectator.set_transform(carla.Transform(location, rotation))
 
+    def follow_ego_vehicle(self, distance=7.5, height=3.5, pitch=-15.0):
+        """Cập nhật Spectator camera mượt mà bám theo ngay sau đuôi xe Ego."""
+        if not self.ego_vehicle or not self.ego_vehicle.is_alive:
+            return
+        transform = self.ego_vehicle.get_transform()
+        yaw_rad = np.deg2rad(transform.rotation.yaw)
+
+        # Đặt camera phía sau và phía trên đuôi xe
+        cam_x = transform.location.x - distance * np.cos(yaw_rad)
+        cam_y = transform.location.y - distance * np.sin(yaw_rad)
+        cam_z = transform.location.z + height
+
+        spectator = self.world.get_spectator()
+        cam_location = carla.Location(x=cam_x, y=cam_y, z=cam_z)
+        cam_rotation = carla.Rotation(pitch=pitch, yaw=transform.rotation.yaw, roll=0.0)
+        spectator.set_transform(carla.Transform(cam_location, cam_rotation))
+
+    def spawn_static_obstacle(self, x, y, z=None, yaw_deg=0.0, bp_filter='static.prop.box01'):
+        """Tạo vật cản tĩnh (hộp gỗ, thùng rác, hoặc rào chắn)."""
+        bp_list = self.world.get_blueprint_library().filter(bp_filter)
+        if not bp_list:
+            bp_list = self.world.get_blueprint_library().filter('static.prop.*')
+        bp = bp_list[0]
+
+        wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
+        spawn_z = (wp.transform.location.z + 0.3) if wp else (0.5 if z is None else z)
+
+        transform = carla.Transform(
+            carla.Location(x=x, y=y, z=spawn_z),
+            carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
+        )
+        actor = self.world.try_spawn_actor(bp, transform)
+        return actor
+
     def clean(self):
-        print("[CARLA] Đang dọn dẹp các actor xe...")
+        print("[CARLA] Đang dọn dẹp các actor xe và vật cản...")
         for vehicle in self.world.get_actors().filter('*vehicle*'):
             try:
                 vehicle.destroy()
+            except Exception:
+                pass
+        for prop in self.world.get_actors().filter('*static.prop*'):
+            try:
+                prop.destroy()
             except Exception:
                 pass
 
@@ -129,6 +168,28 @@ class CarlaSimulator:
             p1 = carla.Location(x=x_ref[i], y=y_ref[i], z=0.5)
             p2 = carla.Location(x=x_ref[i + 1], y=y_ref[i + 1], z=0.5)
             debug.draw_line(p1, p2, thickness=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
+
+    def draw_obstacle_box_3d(self, x, y, size=0.5, life_time=300.0):
+        """Vẽ khối hộp 3D kích thước size x size m (màu đỏ) đại diện cho vật cản lên không gian CARLA."""
+        debug = self.world.debug
+        wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
+        z = wp.transform.location.z + size / 2.0 if wp else size / 2.0
+        
+        box_loc = carla.Location(x=x, y=y, z=z)
+        # Bounding box: extent = bán kính (nửa chiều dài, nửa chiều rộng, nửa chiều cao)
+        extent = carla.Vector3D(x=size / 2.0, y=size / 2.0, z=size / 2.0)
+        box = carla.BoundingBox(box_loc, extent)
+        debug.draw_box(box, carla.Rotation(0, 0, 0), thickness=0.08, color=carla.Color(255, 0, 0), life_time=life_time)
+        # Vẽ thêm chấm tròn đỏ nổi bật
+        debug.draw_point(carla.Location(x=x, y=y, z=z + size / 2.0 + 0.2), size=0.2, color=carla.Color(255, 0, 0), life_time=life_time)
+
+    def spawn_static_box_obstacle(self, x, y, size=0.5):
+        """Tạo vật cản thực tế trên CARLA (thùng hàng) hoặc vẽ khối hộp 0.5x0.5m."""
+        # Ưu tiên spawn actor hộp static.prop.box01 / streetbarrier
+        actor = self.spawn_static_obstacle(x, y, bp_filter='static.prop.box01')
+        # Vẽ viền khối hộp đỏ 0.5m x 0.5m chính xác
+        self.draw_obstacle_box_3d(x, y, size=size, life_time=300.0)
+        return actor
 
     def get_main_ego_vehicle_state(self):
         if not self.ego_vehicle or not self.ego_vehicle.is_alive:

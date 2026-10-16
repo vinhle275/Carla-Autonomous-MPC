@@ -91,10 +91,10 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 # ==============================================================================
 # --- CẤU HÌNH THÍCH ỨNG TỐC ĐỘ KHI GẶP VẬT CẢN (ADAPTIVE SPEED GOVERNOR) ---
 # ==============================================================================
-OBSTACLE_CAUTION_SPEED_MS = 3.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~11 km/h - lướt êm, không chết máy)
-OBSTACLE_SLOWDOWN_DISTANCE_M = 18.0   # Khoảng cách bắt đầu giảm tốc êm (m)
+OBSTACLE_CAUTION_SPEED_MS = 5.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~11 km/h - lướt êm, không chết máy)
+OBSTACLE_SLOWDOWN_DISTANCE_M = 10.0   # Khoảng cách bắt đầu giảm tốc êm (m)
 OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M = 2.0  # Chỉ giảm tốc nếu vật cản nằm trong hành lang tim đường +-2m
-OBSTACLE_PREFER_BYPASS_SIDE = 'left'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
+OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
 
 
 

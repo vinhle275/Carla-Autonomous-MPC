@@ -8,8 +8,15 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.carla_simulator import CarlaSimulator
-from src.config import N, dt, OBSTACLE_SIZE
-from src.help_functions import load_csv_trajectory, load_csv_obstacles, update_reference_point, get_ref_trajectory, normalize_angle
+from src.config import (
+    N, dt, OBSTACLE_SIZE,
+    ENABLE_OBSTACLE_SLOWDOWN, OBSTACLE_SLOWDOWN_DIST, OBSTACLE_SLOWDOWN_SPEED,
+    ENABLE_OBSTACLE_CLUSTERING, CLUSTER_DISTANCE_THRESHOLD
+)
+from src.help_functions import (
+    load_csv_trajectory, load_csv_obstacles, update_reference_point,
+    get_ref_trajectory, normalize_angle, cluster_obstacles
+)
 from src.logger import Logger
 from src.mpc_controller import MpcController
 
@@ -31,7 +38,7 @@ def main():
     yaw_init = theta_traj[0]
 
     carla.spawn_ego_vehicle('vehicle.tesla.model3', x=x_init, y=y_init, yaw_rad=yaw_init)
-    carla.follow_ego_vehicle(distance=7.5, height=3.5, pitch=-15.0)
+    #carla.follow_ego_vehicle(distance=7.5, height=3.5, pitch=-15.0)
 
     # 3. Vẽ toàn bộ quỹ đạo 3D và các vật cản (0.5x0.5m) lên CARLA
     print("[CARLA] Đang hiển thị quỹ đạo 3D và các vật cản lên bản đồ...")
@@ -80,9 +87,21 @@ def main():
                 if dist_to_obs <= 25.0:
                     nearby_obstacles.append(obs)
 
-            # Ghi Log & Cập nhật hàm chi phí bài toán tối ưu (có né vật cản hàm mũ)
+            # Nếu có vật cản phía trước trong bán kính an toàn, tạm thời hạ v_ref để né nhẹ nhàng
+            if ENABLE_OBSTACLE_SLOWDOWN and len(nearby_obstacles) > 0:
+                min_dist = min([np.sqrt((x0 - obs['x'])**2 + (y0 - obs['y'])**2) for obs in nearby_obstacles])
+                if min_dist < OBSTACLE_SLOWDOWN_DIST:
+                    v_ref = np.clip(v_ref, 0.0, OBSTACLE_SLOWDOWN_SPEED)  # Rà phanh đi chậm để né nhẹ nhàng
+
+            # Gom cụm các vật cản gần nhau thành một khối đại diện
+            if ENABLE_OBSTACLE_CLUSTERING and len(nearby_obstacles) > 1:
+                mpc_obstacles = cluster_obstacles(nearby_obstacles, threshold=CLUSTER_DISTANCE_THRESHOLD)
+            else:
+                mpc_obstacles = nearby_obstacles
+
+            # Ghi Log & Cập nhật hàm chi phí bài toán tối ưu (MPC nhận danh sách vật cản đã gom cụm)
             logger.log_controller_input(x0, y0, v0, theta0, x_ref[0], y_ref[0], v_ref[0], theta_ref[0])
-            mpc_controller.update_cost_function(x_ref, y_ref, theta_ref, v_ref, obstacles=nearby_obstacles)
+            mpc_controller.update_cost_function(x_ref, y_ref, theta_ref, v_ref, obstacles=mpc_obstacles)
 
             # Giải bài toán tối ưu MPC
             mpc_controller.solve()
@@ -98,7 +117,7 @@ def main():
             carla.apply_control(steer, throttle, brake)
 
             # Camera Spectator tự động bám theo sau xe khi xe đang chạy
-            carla.follow_ego_vehicle(distance=7.5, height=3.5, pitch=-15.0)
+            #carla.follow_ego_vehicle(distance=7.5, height=3.5, pitch=-15.0)
 
             # Đồng bộ thời gian thực bước sample dt
             calc_time = time.time() - start_time

@@ -29,6 +29,62 @@ def load_csv_obstacles(filepath=None):
             })
     return obstacles
 
+def cluster_obstacles(obstacles, threshold=2.5):
+    """
+    Gom cụm các vật cản gần nhau (khoảng cách <= threshold) thành một khối vật cản đại diện.
+    Trả về danh sách các vật cản đã được gộp với tâm (x, y) và kích thước bao ngoài.
+    """
+    if not obstacles or len(obstacles) <= 1:
+        return obstacles
+
+    clusters = []
+    visited = [False] * len(obstacles)
+
+    for i in range(len(obstacles)):
+        if visited[i]:
+            continue
+
+        current_cluster = [obstacles[i]]
+        visited[i] = True
+        queue = [obstacles[i]]
+
+        while queue:
+            cur = queue.pop(0)
+            for j in range(len(obstacles)):
+                if not visited[j]:
+                    dist = np.sqrt((cur['x'] - obstacles[j]['x'])**2 + (cur['y'] - obstacles[j]['y'])**2)
+                    if dist <= threshold:
+                        visited[j] = True
+                        current_cluster.append(obstacles[j])
+                        queue.append(obstacles[j])
+
+        xs = [o['x'] for o in current_cluster]
+        ys = [o['y'] for o in current_cluster]
+        center_x = float(np.mean(xs))
+        center_y = float(np.mean(ys))
+
+        # Bán kính bao trọn tất cả các vật thể trong cụm
+        max_dist_from_center = max(
+            np.sqrt((o['x'] - center_x)**2 + (o['y'] - center_y)**2) + (o.get('size', 0.5) / 2.0)
+            for o in current_cluster
+        )
+        cluster_size = float(max_dist_from_center * 2.0)
+
+        # Hỗ trợ cả vật cản di chuyển nếu có vx, vy
+        avg_vx = float(np.mean([o.get('vx', 0.0) for o in current_cluster]))
+        avg_vy = float(np.mean([o.get('vy', 0.0) for o in current_cluster]))
+
+        clusters.append({
+            'x': center_x,
+            'y': center_y,
+            'size': cluster_size,
+            'vx': avg_vx,
+            'vy': avg_vy,
+            'count': len(current_cluster)
+        })
+
+    return clusters
+
 def load_csv_trajectory(filepath=None):
     """
     Đọc file CSV chứa quỹ đạo tham chiếu (x, y, theta_rad, v_m_s).

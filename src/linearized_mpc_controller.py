@@ -188,13 +188,13 @@ class LinearizedMpcController:
           nhưng phần lớn khối tích/đuôi xe hoặc các vật cản kế tiếp trong cụm lại nằm dạt sang bên còn lại.
         - Trả về: (side_sign, A_shift, span_left, span_right)
         """
-        # 1. Thu thập tất cả các điểm biểu diễn của primary_obs và các vật cản lân cận trong cụm (cách dưới 6m)
+        # 1. Thu thập tất cả các điểm biểu diễn của primary_obs và các vật cản lân cận trong cụm (cách dưới 8.5m)
         all_pts = self.extract_obstacle_points(primary_obs)
         if candidate_obstacles:
             p_dist = primary_obs.get('dist', 10.0)
             for c_obs in candidate_obstacles:
                 if c_obs.get('id') != primary_obs.get('id'):
-                    if abs(c_obs.get('dist', p_dist) - p_dist) <= 6.0:
+                    if abs(c_obs.get('dist', p_dist) - p_dist) <= 8.5:
                         all_pts.extend(self.extract_obstacle_points(c_obs))
 
         # 2. Chiếu tất cả các điểm lên tim đường để xác định độ chiếm dụng không gian hai bên làn
@@ -243,8 +243,8 @@ class LinearizedMpcController:
             # Né PHẢI: mép vật cản gần làn né nhất là span_right
             A_shift = max(1.95, span_right + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
 
-        # Giới hạn A_shift tối đa để không bao giờ lao ra khỏi lòng đường (tối đa 2.40m)
-        A_shift = min(A_shift, 2.40)
+        # Giới hạn A_shift tối đa để vừa đủ thoát cụm vật cản mà không lao ra ngoài lề đường (tối đa 3.60m)
+        A_shift = min(A_shift, 4.0)
 
         return side_sign, A_shift, span_left, span_right
 
@@ -263,7 +263,19 @@ class LinearizedMpcController:
         ny0 = tx0
         x_ego, y_ego = x_init[0], x_init[1]
 
-        # 1. Kiểm tra trạng thái của vật cản đang né hiện tại (nếu có)
+        # 1. Thu thập và phân loại vật cản nguy hiểm từ cảm biến (hành lang mở rộng 4.2m, tầm xa 26.0m)
+        crit_obs = []
+        if detected_obstacles and len(detected_obstacles) > 0:
+            for obs in detected_obstacles:
+                d_long_ego = tx0 * (obs['x'] - x_ego) + ty0 * (obs['y'] - y_ego)
+                d_lat_road, _, _, _ = self.calculate_lateral_to_road(obs['x'], obs['y'], x_ref, y_ref, theta_ref)
+                if 0.0 <= d_long_ego <= 26.0 and abs(d_lat_road) <= 4.2:
+                    obs_c = dict(obs)
+                    obs_c['d_long_ego'] = d_long_ego
+                    obs_c['d_lat_road'] = d_lat_road
+                    crit_obs.append(obs_c)
+
+        # 2. Quản lý trạng thái vật cản đang né hiện tại (nếu có)
         if self.active_obstacle is not None:
             x_o = self.active_obstacle['x']
             y_o = self.active_obstacle['y']
@@ -275,25 +287,34 @@ class LinearizedMpcController:
             else:
                 progress_ego = tx0 * (x_ego - x_o) + ty0 * (y_ego - y_o)
 
-            # Chaining cho cụm nhiều vật cản gần nhau (Obstacle Cluster Chaining):
-            # Nếu xe đã bắt đầu vượt qua vật cản hiện tại (progress_ego >= 0.0)
-            # kiểm tra xem phía trước có vật cản tiếp theo trong cụm hay không.
-            if progress_ego >= 0.0 and detected_obstacles:
-                next_cluster_obs = []
-                for obs in detected_obstacles:
-                    if obs.get('id') == self.active_obstacle.get('id'):
-                        continue
-                    d_long_ego = tx0 * (obs['x'] - x_ego) + ty0 * (obs['y'] - y_ego)
-                    d_lat_road, _, _, _ = self.calculate_lateral_to_road(obs['x'], obs['y'], x_ref, y_ref, theta_ref)
-                    # Vật cản phía trước xe (0.3m đến 20m) và nằm trong phạm vi lòng đường (tối thiểu +-2.6m)
-                    if 0.3 <= d_long_ego <= 20.0 and abs(d_lat_road) <= max(2.6, OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M + 1.0):
-                        next_cluster_obs.append(obs)
+            # Cơ chế cập nhật từ xa có kiểm soát (Early Foresight & Latched Direction):
+            # - Khi xe còn ở xa (progress_ego < -12.0m): Cho phép cập nhật lại side_sign nếu cảm biến thấy thêm vật cản mới
+            # - Khi xe đã vào cự ly tiếp cận (-12.0m <= progress_ego < -2.0m): KHÓA CỨNG side_sign để triệt tiêu hiện tượng giật vô lăng;
+            #   chỉ mở rộng biên độ né A_shift nếu phát hiện vật cản phình rộng
+            if progress_ego < -12.0 and crit_obs:
+                primary = min(crit_obs, key=lambda o: o['dist'])
+                side_sign, A_shift, _, _ = self.analyze_spatial_occupancy(primary, crit_obs, x_ref, y_ref, theta_ref)
+                self.active_obstacle['side_sign'] = side_sign
+                self.active_obstacle['A_shift'] = max(A_shift, self.active_obstacle['A_shift'])
+                self.active_obstacle['x'] = primary['x']
+                self.active_obstacle['y'] = primary['y']
+            elif progress_ego < -2.0 and crit_obs:
+                primary = min(crit_obs, key=lambda o: o['dist'])
+                _, A_shift, _, _ = self.analyze_spatial_occupancy(primary, crit_obs, x_ref, y_ref, theta_ref)
+                self.active_obstacle['A_shift'] = max(A_shift, self.active_obstacle['A_shift'])
 
+            # Chaining cho cụm nhiều vật cản gần nhau (Obstacle Cluster Chaining):
+            # Khi xe bắt đầu vượt qua vật cản hiện tại (progress_ego >= -0.5m), chuyển giao sang vật kế tiếp trong cụm
+            # đồng thời DUY TRÌ HƯỚNG NÉ preserved_side để xe không bị đánh võng giữa cụm
+            if progress_ego >= -0.5 and crit_obs:
+                next_cluster_obs = [
+                    o for o in crit_obs
+                    if o.get('id') != self.active_obstacle.get('id') and o.get('d_long_ego', 1.0) >= 0.5
+                ]
                 if next_cluster_obs:
-                    next_obs = min(next_cluster_obs, key=lambda o: math.hypot(o['x'] - x_ego, o['y'] - y_ego))
+                    next_obs = min(next_cluster_obs, key=lambda o: o['dist'])
                     preserved_side = self.active_obstacle['side_sign']
 
-                    # Cập nhật A_shift thích ứng theo độ chiếm dụng thực tế của vật cản kế tiếp
                     _, new_A_shift, _, _ = self.analyze_spatial_occupancy(
                         next_obs, next_cluster_obs, x_ref, y_ref, theta_ref
                     )
@@ -322,7 +343,6 @@ class LinearizedMpcController:
             if progress_ego > 11.0:
                 self.active_obstacle = None
             else:
-                # Nếu vật cản vẫn còn nhìn thấy phía trước (xe chưa qua ngang hàng), cập nhật nhẹ vị trí nếu có
                 if progress_ego < 0.0 and detected_obstacles:
                     for obs in detected_obstacles:
                         if obs.get('id') == self.active_obstacle.get('id'):
@@ -330,43 +350,29 @@ class LinearizedMpcController:
                             self.active_obstacle['y'] = obs['y']
                             break
 
-        # 2. Nếu chưa có vật cản nào đang né, tìm kiếm vật cản nguy hiểm mới từ cảm biến
-        if self.active_obstacle is None:
-            if detected_obstacles and len(detected_obstacles) > 0:
-                crit_obs = []
-                for obs in detected_obstacles:
-                    d_long_ego = tx0 * (obs['x'] - x_ego) + ty0 * (obs['y'] - y_ego)
-                    d_lat_road, _, _, _ = self.calculate_lateral_to_road(obs['x'], obs['y'], x_ref, y_ref, theta_ref)
-                    # Vật cản nguy hiểm nằm trong phạm vi lòng đường (+-2.6m)
-                    if 0.0 <= d_long_ego <= 22.0 and abs(d_lat_road) <= max(2.6, OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M + 0.8):
-                        crit_obs.append(obs)
+        # 3. Nếu chưa có vật cản nào đang né, kích hoạt từ danh sách crit_obs
+        if self.active_obstacle is None and crit_obs:
+            primary_obs = min(crit_obs, key=lambda o: o['dist'])
+            side_sign, A_shift, span_left, span_right = self.analyze_spatial_occupancy(
+                primary_obs, crit_obs, x_ref, y_ref, theta_ref
+            )
+            r_safe = primary_obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
+            self.active_obstacle = {
+                'id': primary_obs.get('id'),
+                'type': primary_obs.get('type'),
+                'x': primary_obs['x'],
+                'y': primary_obs['y'],
+                'radius': primary_obs['radius'],
+                'r_safe': r_safe,
+                'side_sign': side_sign,
+                'A_shift': A_shift
+            }
 
-                if crit_obs:
-                    primary_obs = min(crit_obs, key=lambda o: math.hypot(o['x'] - x_ego, o['y'] - y_ego))
-                    
-                    # Thuật toán Phân tích Độ chiếm dụng Không gian & Khoảng trống Khả dụng (Spatial Occupancy)
-                    side_sign, A_shift, span_left, span_right = self.analyze_spatial_occupancy(
-                        primary_obs, crit_obs, x_ref, y_ref, theta_ref
-                    )
-
-                    r_safe = primary_obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
-
-                    self.active_obstacle = {
-                        'id': primary_obs.get('id'),
-                        'type': primary_obs.get('type'),
-                        'x': primary_obs['x'],
-                        'y': primary_obs['y'],
-                        'radius': primary_obs['radius'],
-                        'r_safe': r_safe,
-                        'side_sign': side_sign,
-                        'A_shift': A_shift
-                    }
-
-        # 3. Nếu không có vật cản nào đang kích hoạt -> Trả về tham chiếu gốc
+        # 4. Nếu không có vật cản nào đang kích hoạt -> Trả về tham chiếu gốc
         if self.active_obstacle is None:
             return np.copy(x_ref), np.copy(y_ref), np.copy(theta_ref), np.copy(v_ref), False
 
-        # 4. Tính toán quỹ đạo uốn lượn S-curve cho cả đoạn chân trời N bước
+        # 5. Tính toán quỹ đạo uốn lượn S-curve cho cả đoạn chân trời N bước
         x_o = self.active_obstacle['x']
         y_o = self.active_obstacle['y']
         side_sign = self.active_obstacle['side_sign']
@@ -384,16 +390,13 @@ class LinearizedMpcController:
             ny_k = math.cos(th_k)
 
             # Tọa độ dọc của waypoint k so với vật cản
-            # progress_k < 0: waypoint ở trước vật cản
-            # progress_k = 0: waypoint ngang hàng vật cản
-            # progress_k > 0: waypoint ở sau vật cản
             progress_k = tx_k * (x_ref[k] - x_o) + ty_k * (y_ref[k] - y_o)
 
             if progress_k < -2.0:
-                # Giai đoạn tiếp cận: đánh lái mở từ từ sang trái/phải
+                # Giai đoạn tiếp cận: mở góc lái dứt khoát trong 11m (từ -13m đến -2m)
                 dist_before = -progress_k
-                if dist_before <= 22.0:
-                    w = 0.5 * (1.0 + math.cos(math.pi * (dist_before - 2.0) / 20.0))
+                if dist_before <= 13.0:
+                    w = 0.5 * (1.0 + math.cos(math.pi * (dist_before - 2.0) / 11.0))
                 else:
                     w = 0.0
             elif -2.0 <= progress_k <= 4.0:

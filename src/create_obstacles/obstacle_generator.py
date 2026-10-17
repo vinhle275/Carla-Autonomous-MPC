@@ -3,6 +3,7 @@ import sys
 import time
 import math
 import random
+import csv
 import numpy as np
 
 # Thêm đường dẫn gốc của dự án vào sys.path
@@ -24,6 +25,8 @@ from src.config import (
     OBSTACLE_CLUSTER_SIZES,
     STATIC_OBSTACLE_BLUEPRINTS,
     TRAJECTORY_CSV_PATH,
+    OBSTACLES_CSV_PATH,
+    USE_FIXED_OBSTACLES_CSV,
     CARLA_HOST,
     CARLA_PORT
 )
@@ -69,15 +72,129 @@ class ObstacleManager:
             return fallback[0]
         return bp_lib.filter('vehicle.tesla.model3')[0]
 
+    def spawn_obstacles_from_csv(self, csv_path, x_traj, y_traj, theta_traj):
+        """
+        Đọc và sinh các vật cản cố định từ file CSV (được tạo bởi generate_path.py)
+        """
+        print(f"\n--- BẮT ĐẦU SPAWN VẬT CẢN CỐ ĐỊNH TỪ FILE CSV ---")
+        print(f"[NGUỒN] File: {csv_path}")
+
+        obstacles_data = []
+        try:
+            with open(csv_path, mode='r') as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) >= 2:
+                        try:
+                            ox = float(row[0].strip())
+                            oy = float(row[1].strip())
+                            size = float(row[2].strip()) if len(row) >= 3 else 0.5
+                            obstacles_data.append((ox, oy, size))
+                        except ValueError:
+                            continue
+        except Exception as e:
+            print(f"[LỖI ĐỌC CSV] Không thể đọc file vật cản: {e}")
+            return []
+
+        if not obstacles_data:
+            print("[THÔNG BÁO] File CSV vật cản trống! Không có vật cản cố định nào.")
+            return []
+
+        # Tính khoảng cách s tích lũy của quỹ đạo
+        s_accum = [0.0]
+        for i in range(1, len(x_traj)):
+            s_accum.append(s_accum[-1] + math.hypot(x_traj[i] - x_traj[i - 1], y_traj[i] - y_traj[i - 1]))
+
+        obstacle_counter = 1
+        for obs_x, obs_y, obs_size in obstacles_data:
+            # Tìm waypoint gần nhất trên quỹ đạo để tính thông số
+            dists = [math.hypot(x_traj[i] - obs_x, y_traj[i] - obs_y) for i in range(len(x_traj))]
+            idx_closest = int(np.argmin(dists))
+            obs_s = s_accum[idx_closest]
+            yaw_traj = theta_traj[idx_closest]
+            yaw_deg = math.degrees(yaw_traj)
+
+            # Tính độ lệch ngang so với tim đường tại vị trí đó
+            tx = math.cos(yaw_traj)
+            ty = math.sin(yaw_traj)
+            nx = -ty
+            ny = tx
+            d_lat = nx * (obs_x - x_traj[idx_closest]) + ny * (obs_y - y_traj[idx_closest])
+
+            # Lấy cao độ mặt đường Z từ CARLA Map
+            wp_road = self.carla_map.get_waypoint(
+                carla.Location(x=obs_x, y=obs_y, z=0.0),
+                project_to_road=True,
+                lane_type=carla.LaneType.Any
+            )
+            spawn_z = wp_road.transform.location.z + 0.3 if wp_road else 0.5
+
+            # Chọn blueprint
+            bp_candidates = STATIC_OBSTACLE_BLUEPRINTS if STATIC_OBSTACLE_BLUEPRINTS else ['static.prop.box01']
+            bp_name = bp_candidates[(obstacle_counter - 1) % len(bp_candidates)]
+            bp = self.get_valid_blueprint(bp_name)
+            is_vehicle = 'vehicle' in bp.id
+
+            spawn_transform = carla.Transform(
+                carla.Location(x=obs_x, y=obs_y, z=spawn_z),
+                carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
+            )
+
+            actor = self.world.try_spawn_actor(bp, spawn_transform)
+            if actor is not None:
+                if is_vehicle:
+                    actor.apply_control(carla.VehicleControl(hand_brake=True, throttle=0.0, brake=1.0))
+
+                self.spawned_obstacles.append(actor)
+
+                pos_desc = "TRÊN TIM ĐƯỜNG" if abs(d_lat) < 0.15 else (
+                    f"lệch phải +{d_lat:.1f}m" if d_lat > 0 else f"lệch trái {d_lat:.1f}m"
+                )
+
+                record = {
+                    'index': obstacle_counter,
+                    'actor_id': actor.id,
+                    'type': bp.id,
+                    'is_vehicle': is_vehicle,
+                    'x': round(obs_x, 2),
+                    'y': round(obs_y, 2),
+                    'z': round(spawn_z, 2),
+                    's_distance': round(obs_s, 1),
+                    'lateral_offset': d_lat,
+                    'position_type': f"CỐ ĐỊNH ({pos_desc})"
+                }
+                self.obstacle_records.append(record)
+
+                print(f"  [{obstacle_counter:02d}] Đã tạo (Cố định): {bp.id:<28} | Quãng đường: {obs_s:6.1f}m | "
+                      f"Vị trí: ({obs_x:6.2f}, {obs_y:6.2f}) | {pos_desc}")
+                obstacle_counter += 1
+            else:
+                print(f"  [!] Thử spawn vật cản tại ({obs_x:.2f}, {obs_y:.2f}) bị vướng địa hình CARLA, bỏ qua...")
+
+        # Vẽ Marker 3D
+        self.draw_debug_markers(life_time=OBSTACLE_PREVIEW_DURATION_SEC + 10.0)
+        print(f"\n[THÀNH CÔNG] Đã sinh tổng cộng {len(self.spawned_obstacles)} vật cản cố định từ CSV.")
+        return self.spawned_obstacles
+
     def generate_obstacles(self, x_traj, y_traj, theta_traj):
         """
-        Sinh các vật cản tĩnh theo cấu hình định nghĩa trong config.py:
-        - Xuất hiện từ mét thứ 25 của quỹ đạo (hoặc OBSTACLE_START_DISTANCE_M)
-        - Hỗ trợ cụm 2 - 3 vật cản sát nhau cách nhau 2 - 3m (ENABLE_OBSTACLE_CLUSTERS)
-        - Khoảng cách giữa các cụm tối thiểu OBSTACLE_MIN_DISTANCE_M
-        - Đặt cả trên quỹ đạo và xung quanh quỹ đạo (OBSTACLE_LATERAL_OFFSETS)
+        Sinh các vật cản tĩnh:
+        - Ưu tiên đọc các vật cản cố định từ data/obstacles.csv nếu được bật cấu hình USE_FIXED_OBSTACLES_CSV.
+        - Nếu không có file CSV hoặc rỗng: Fallback sang sinh cụm ngẫu nhiên dọc theo quỹ đạo.
         """
-        print("\n--- BẮT ĐẦU SINH VẬT CẢN TĨNH DỌC THEO QUỸ ĐẠO ---")
+        # 1. Kiểm tra nếu có cấu hình sử dụng vật cản cố định từ CSV
+        if USE_FIXED_OBSTACLES_CSV and os.path.exists(OBSTACLES_CSV_PATH):
+            try:
+                with open(OBSTACLES_CSV_PATH, 'r') as f:
+                    lines = [l.strip() for l in f if l.strip()]
+                if len(lines) > 1:  # Có header và ít nhất 1 dòng dữ liệu
+                    print("[CHẾ ĐỘ] Phát hiện file vật cản cố định data/obstacles.csv. Tiến hành spawn vật cản cố định...")
+                    return self.spawn_obstacles_from_csv(OBSTACLES_CSV_PATH, x_traj, y_traj, theta_traj)
+            except Exception as e:
+                print(f"[CẢNH BÁO] Không đọc được data/obstacles.csv ({e}), chuyển sang chế độ sinh tự động...")
+
+        print("\n--- BẮT ĐẦU SINH VẬT CẢN TĨNH DỌC THEO QUỸ ĐẠO (TỰ ĐỘNG) ---")
         total_points = len(x_traj)
         if total_points < 10:
             print("[CẢNH BÁO] Quỹ đạo quá ngắn để sinh vật cản!")

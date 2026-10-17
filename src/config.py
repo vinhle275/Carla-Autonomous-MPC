@@ -1,10 +1,15 @@
 import os
 import numpy as np
 
-# Thư mục lưu trữ quỹ đạo và biểu đồ kết quả
+# Thư mục lưu trữ quỹ đạo, vật cản và biểu đồ kết quả
 TRAJECTORY_CSV_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../data/reference_trajectory.csv")
 )
+OBSTACLES_CSV_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../data/obstacles.csv")
+)
+OBSTACLE_SIZE = 0.5                   # Kích thước khối hộp vật cản (m)
+USE_FIXED_OBSTACLES_CSV = True        # True: Ưu tiên spawn vật cản cố định từ data/obstacles.csv nếu có
 PLOTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../plots")
 )
@@ -38,10 +43,10 @@ FINE_Y_COEF = 20.0           # Phạt sai số Y
 FINE_V_COEF = 20.0           # Phạt sai số vận tốc V
 FINE_THETA_COEF = 30.0       # Phạt sai số góc hướng Theta
 FINE_LATERAL_COEF = 40.0     # Phạt độ lệch ngang vừa phải (nhập làn êm, không giật)
-FINE_STEER_COEF = 40.0       # Phạt góc lái lớn (vô lăng đầm chắc, chỉ nhích nhẹ 5-15 độ)
+FINE_STEER_COEF = 25.0       # Phạt góc lái (cho phép mở góc lái linh hoạt 15-35 độ khi né vật cản)
 FINE_ACC_COEF = 1.0          # Phạt sử dụng gia tốc quá lớn
-FINE_STEER_DOT_COEF = 600.0  # Phạt tốc độ bẻ lái dồn dập (Triệt tiêu tuyệt đối hiện tượng lắc vô lăng)
-FINE_ACC_DOT_COEF = 10.0     # Phạt giật ga/phanh
+FINE_STEER_DOT_COEF = 500.0  # Phạt tốc độ bẻ lái (đủ đầm chắc để không lắc, nhưng bẻ lái dứt khoát kịp thời)
+FINE_ACC_DOT_COEF = 20.0     # Phạt giật ga/phanh
 
 # ==============================================================================
 # --- CẤU HÌNH SINH VẬT CẢN (OBSTACLE GENERATION) ---
@@ -64,21 +69,25 @@ OBSTACLE_CLUSTER_SIZES = [2, 3]       # Kích thước cụm khi kích hoạt (n
 OBSTACLE_LATERAL_OFFSETS = [0.0, -1.5, 1.5, -0.8, 0.8]
 
 # Danh sách Blueprint các vật cản tĩnh phong phú (Cọc tiêu, rào chắn, thùng hàng, xe đỗ tĩnh)
+# STATIC_OBSTACLE_BLUEPRINTS = [
+#     'static.prop.constructioncone',       # Cọc tiêu giao thông phản quang
+#     'static.prop.streetbarrier',          # Rào chắn công trường
+#     'static.prop.trafficwarning',         # Biển cảnh báo tam giác
+#     'static.prop.box01',                  # Thùng hàng / hộp xốp lớn
+#     'static.prop.box02',                  # Thùng hàng kích thước vừa
+#     'vehicle.audi.etron',                 # Xe Audi đỗ dừng tĩnh
+#     'vehicle.toyota.prius',               # Xe Toyota đỗ dừng tĩnh
+#     'vehicle.mini.cooperst',              # Xe Mini Cooper đỗ dừng tĩnh
+# ]
 STATIC_OBSTACLE_BLUEPRINTS = [
-    'static.prop.constructioncone',       # Cọc tiêu giao thông phản quang
-    'static.prop.streetbarrier',          # Rào chắn công trường
-    'static.prop.trafficwarning',         # Biển cảnh báo tam giác
-    'static.prop.box01',                  # Thùng hàng / hộp xốp lớn
-    'static.prop.box02',                  # Thùng hàng kích thước vừa
-    'vehicle.audi.etron',                 # Xe Audi đỗ dừng tĩnh
-    'vehicle.toyota.prius',               # Xe Toyota đỗ dừng tĩnh
-    'vehicle.mini.cooperst',              # Xe Mini Cooper đỗ dừng tĩnh
+    'static.prop.box01',
+    'static.prop.box02',
 ]
 
 # ==============================================================================
 # --- CẤU HÌNH CẢM BIẾN NHẬN THỨC VẬT CẢN (PERCEPTION / SENSOR) ---
 # ==============================================================================
-SENSOR_DETECTION_RANGE_M = 20.0       # Tầm quét xa tối đa của cảm biến trước xe (m)
+SENSOR_DETECTION_RANGE_M = 28.0       # Tầm quét xa tối đa của cảm biến trước xe (m)
 SENSOR_FOV_DEG = 120.0                 # Góc mở trường nhìn (Field of View - FOV) phía trước mũi xe (độ)
 SENSOR_SURROUND_RANGE_M = 10.0        # Tầm quét 360 độ của cảm biến cự ly gần (Ultrasonic / Blind-spot Radar quanh thân xe)
 SENSOR_TRACK_DROP_BEHIND_M = 3.0      # Khoảng cách sau lưng xe (m) để xóa vật cản khỏi Local Object Map
@@ -98,10 +107,10 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 # ==============================================================================
 # --- CẤU HÌNH THÍCH ỨNG TỐC ĐỘ KHI GẶP VẬT CẢN (ADAPTIVE SPEED GOVERNOR) ---
 # ==============================================================================
-OBSTACLE_CAUTION_SPEED_MS = 6.5       # Vận tốc an toàn khi lách qua vật cản (m/s) (~23.4 km/h - lướt êm, thoát nhanh, không quá chậm)
-OBSTACLE_SLOWDOWN_DISTANCE_M = 10.0   # Khoảng cách bắt đầu giảm tốc êm (m)
+OBSTACLE_CAUTION_SPEED_MS = 5.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~23.4 km/h - lướt êm, thoát nhanh, không quá chậm)
+OBSTACLE_SLOWDOWN_DISTANCE_M = 15.0   # Khoảng cách bắt đầu giảm tốc êm (m)
 OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M = 0.5  # Chỉ giảm tốc nếu vật cản nằm trong hành lang tim đường +-2m
-OBSTACLE_PREFER_BYPASS_SIDE = 'left'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
+OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
 
 
 

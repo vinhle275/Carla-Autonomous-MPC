@@ -135,6 +135,17 @@ class CarlaSimulator:
             p2 = carla.Location(x=x_ref[i + 1], y=y_ref[i + 1], z=0.5)
             debug.draw_line(p1, p2, thickness=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
 
+    def draw_obstacle_box_3d(self, x, y, size=0.5, life_time=300.0):
+        """Vẽ khối hộp 3D màu đỏ và nhãn đánh dấu vật cản trên CARLA 3D"""
+        debug = self.world.debug
+        wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
+        z = wp.transform.location.z + size / 2.0 if wp else 0.5
+        box_loc = carla.Location(x=x, y=y, z=z)
+        extent = carla.Vector3D(x=size / 2.0, y=size / 2.0, z=size / 2.0)
+        box = carla.BoundingBox(box_loc, extent)
+        debug.draw_box(box, carla.Rotation(0, 0, 0), thickness=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
+        debug.draw_string(carla.Location(x=x, y=y, z=z + size + 0.3), "OBS", color=carla.Color(255, 50, 50), life_time=life_time)
+
     def get_main_ego_vehicle_state(self):
         if not self.ego_vehicle or not self.ego_vehicle.is_alive:
             raise RuntimeError("Xe Ego trong CARLA đã bị phá hủy hoặc rơi khỏi bản đồ!")

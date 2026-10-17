@@ -12,11 +12,16 @@ import carla
 from src.carla_simulator import CarlaSimulator
 from src.help_functions import load_csv_trajectory
 from src.config import (
+    OBSTACLE_START_DISTANCE_M,
     OBSTACLE_START_TRAJECTORY_FRACTION,
     OBSTACLE_END_TRAJECTORY_FRACTION,
     OBSTACLE_MIN_DISTANCE_M,
     OBSTACLE_PREVIEW_DURATION_SEC,
     OBSTACLE_LATERAL_OFFSETS,
+    ENABLE_OBSTACLE_CLUSTERS,
+    OBSTACLE_CLUSTER_SPACING_M,
+    OBSTACLE_CLUSTER_CHANCE,
+    OBSTACLE_CLUSTER_SIZES,
     STATIC_OBSTACLE_BLUEPRINTS,
     TRAJECTORY_CSV_PATH,
     CARLA_HOST,
@@ -67,8 +72,9 @@ class ObstacleManager:
     def generate_obstacles(self, x_traj, y_traj, theta_traj):
         """
         Sinh các vật cản tĩnh theo cấu hình định nghĩa trong config.py:
-        - Xuất hiện từ 1/3 quỹ đạo (OBSTACLE_START_TRAJECTORY_FRACTION)
-        - Cách nhau tối thiểu OBSTACLE_MIN_DISTANCE_M (50m)
+        - Xuất hiện từ mét thứ 25 của quỹ đạo (hoặc OBSTACLE_START_DISTANCE_M)
+        - Hỗ trợ cụm 2 - 3 vật cản sát nhau cách nhau 2 - 3m (ENABLE_OBSTACLE_CLUSTERS)
+        - Khoảng cách giữa các cụm tối thiểu OBSTACLE_MIN_DISTANCE_M
         - Đặt cả trên quỹ đạo và xung quanh quỹ đạo (OBSTACLE_LATERAL_OFFSETS)
         """
         print("\n--- BẮT ĐẦU SINH VẬT CẢN TĨNH DỌC THEO QUỸ ĐẠO ---")
@@ -85,101 +91,124 @@ class ObstacleManager:
         s_accumulated = np.array(s_accumulated)
         total_distance = s_accumulated[-1]
 
-        # 2. Xác định phạm vi quãng đường sinh vật cản (từ 1/3 quỹ đạo đến 95%)
-        s_start = total_distance * OBSTACLE_START_TRAJECTORY_FRACTION
+        # 2. Xác định phạm vi quãng đường sinh vật cản
+        if OBSTACLE_START_DISTANCE_M is not None:
+            s_start = min(float(OBSTACLE_START_DISTANCE_M), total_distance * 0.9)
+        elif OBSTACLE_START_TRAJECTORY_FRACTION is not None:
+            s_start = total_distance * OBSTACLE_START_TRAJECTORY_FRACTION
+        else:
+            s_start = 25.0
+
         s_end = total_distance * OBSTACLE_END_TRAJECTORY_FRACTION
 
         print(f"[THÔNG TIN QUỸ ĐẠO] Tổng quãng đường: {total_distance:.1f}m")
-        print(f"[VÙNG SINH VẬT CẢN] Từ {s_start:.1f}m (1/3 quỹ đạo) đến {s_end:.1f}m")
-        print(f"[QUY TẮC] Khoảng cách tối thiểu giữa 2 vật cản: {OBSTACLE_MIN_DISTANCE_M}m")
+        print(f"[VÙNG SINH VẬT CẢN] Bắt đầu từ mét thứ {s_start:.1f}m đến {s_end:.1f}m")
+        print(f"[QUY TẮC] Cụm vật cản sát nhau (2-3m): {'BẬT' if ENABLE_OBSTACLE_CLUSTERS else 'TẮT'} | Khoảng cách giữa các cụm: {OBSTACLE_MIN_DISTANCE_M}m")
 
         # 3. Duyệt và tạo vật cản
-        current_s = s_start + random.uniform(5.0, 15.0)
+        current_s = s_start
         offset_idx = 0
         obstacle_counter = 1
 
         while current_s <= s_end:
-            # Tìm chỉ số waypoint gần nhất với khoảng cách current_s
-            idx = int(np.searchsorted(s_accumulated, current_s))
-            if idx >= total_points:
-                break
+            # Quyết định kích thước cụm (2-3 vật cản gần nhau hoặc 1 vật cản đơn)
+            if ENABLE_OBSTACLE_CLUSTERS and random.random() < OBSTACLE_CLUSTER_CHANCE:
+                cluster_size = random.choice(OBSTACLE_CLUSTER_SIZES)
+            else:
+                cluster_size = 1
 
-            x_ref = x_traj[idx]
-            y_ref = y_traj[idx]
-            theta_ref = theta_traj[idx]
-
-            # Chọn độ lệch ngang d_lat (luân phiên để đảm bảo có cả trên quỹ đạo và gần quỹ đạo)
-            d_lat = OBSTACLE_LATERAL_OFFSETS[offset_idx % len(OBSTACLE_LATERAL_OFFSETS)]
+            # Chọn độ lệch ngang cơ sở cho cụm vật cản
+            base_d_lat = OBSTACLE_LATERAL_OFFSETS[offset_idx % len(OBSTACLE_LATERAL_OFFSETS)]
             offset_idx += 1
 
-            # Tọa độ vật cản:
-            # Vector ngang vuông góc với tim đường: (-sin(theta), cos(theta))
-            x_obs = x_ref - d_lat * math.sin(theta_ref)
-            y_obs = y_ref + d_lat * math.cos(theta_ref)
+            for c_i in range(cluster_size):
+                obs_s = current_s + c_i * OBSTACLE_CLUSTER_SPACING_M
+                if obs_s > s_end:
+                    break
 
-            # Lấy độ cao z từ mặt đường CARLA tại vị trí đặt vật cản
-            wp = self.carla_map.get_waypoint(
-                carla.Location(x=x_obs, y=y_obs, z=0.0),
-                project_to_road=True,
-                lane_type=carla.LaneType.Any
-            )
-            road_z = wp.transform.location.z if wp else 0.5
+                # Tìm chỉ số waypoint gần nhất với khoảng cách obs_s
+                idx = int(np.searchsorted(s_accumulated, obs_s))
+                if idx >= total_points:
+                    break
 
-            # Chọn Blueprint ngẫu nhiên từ danh sách cấu hình
-            bp_name = random.choice(STATIC_OBSTACLE_BLUEPRINTS)
-            bp = self.get_valid_blueprint(bp_name)
+                x_ref = x_traj[idx]
+                y_ref = y_traj[idx]
+                theta_ref = theta_traj[idx]
 
-            is_vehicle = 'vehicle' in bp.id
-            if is_vehicle:
-                spawn_z = road_z + 0.4
-                # Xe đỗ cùng chiều hoặc hơi chéo theo góc đường
-                yaw_deg = math.degrees(theta_ref) + random.uniform(-10.0, 10.0)
-            else:
-                spawn_z = road_z + 0.15
-                yaw_deg = math.degrees(theta_ref)
+                # Độ lệch ngang: các vật cản trong cùng cụm giữ cùng dải làn (xê dịch nhẹ 0.15m)
+                if cluster_size > 1 and c_i > 0:
+                    d_lat = base_d_lat + random.uniform(-0.15, 0.15)
+                else:
+                    d_lat = base_d_lat
 
-            spawn_transform = carla.Transform(
-                carla.Location(x=x_obs, y=y_obs, z=spawn_z),
-                carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
-            )
+                # Tọa độ vật cản:
+                # Vector ngang vuông góc với tim đường: (-sin(theta), cos(theta))
+                x_obs = x_ref - d_lat * math.sin(theta_ref)
+                y_obs = y_ref + d_lat * math.cos(theta_ref)
 
-            # Spawn actor vào CARLA
-            actor = self.world.try_spawn_actor(bp, spawn_transform)
+                # Lấy độ cao z từ mặt đường CARLA tại vị trí đặt vật cản
+                wp = self.carla_map.get_waypoint(
+                    carla.Location(x=x_obs, y=y_obs, z=0.0),
+                    project_to_road=True,
+                    lane_type=carla.LaneType.Any
+                )
+                road_z = wp.transform.location.z if wp else 0.5
 
-            if actor is not None:
+                # Chọn Blueprint ngẫu nhiên từ danh sách cấu hình
+                bp_name = random.choice(STATIC_OBSTACLE_BLUEPRINTS)
+                bp = self.get_valid_blueprint(bp_name)
+
+                is_vehicle = 'vehicle' in bp.id
                 if is_vehicle:
-                    # Kéo phanh tay để xe giữ nguyên vị trí cố định (vật cản tĩnh)
-                    actor.apply_control(carla.VehicleControl(hand_brake=True, throttle=0.0, brake=1.0))
+                    spawn_z = road_z + 0.4
+                    yaw_deg = math.degrees(theta_ref) + random.uniform(-10.0, 10.0)
+                else:
+                    spawn_z = road_z + 0.15
+                    yaw_deg = math.degrees(theta_ref)
 
-                self.spawned_obstacles.append(actor)
-
-                pos_desc = "TRÊN QUỸ ĐẠO (tim đường)" if abs(d_lat) < 0.1 else (
-                    f"GẦN QUỸ ĐẠO (lệch trái +{d_lat:.1f}m)" if d_lat > 0 else f"GẦN QUỸ ĐẠO (lệch phải {d_lat:.1f}m)"
+                spawn_transform = carla.Transform(
+                    carla.Location(x=x_obs, y=y_obs, z=spawn_z),
+                    carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
                 )
 
-                record = {
-                    'index': obstacle_counter,
-                    'actor_id': actor.id,
-                    'type': bp.id,
-                    'is_vehicle': is_vehicle,
-                    'x': round(x_obs, 2),
-                    'y': round(y_obs, 2),
-                    'z': round(spawn_z, 2),
-                    's_distance': round(current_s, 1),
-                    'lateral_offset': d_lat,
-                    'position_type': pos_desc
-                }
-                self.obstacle_records.append(record)
+                # Spawn actor vào CARLA
+                actor = self.world.try_spawn_actor(bp, spawn_transform)
 
-                print(f"  [{obstacle_counter:02d}] Đã tạo: {bp.id:<30} | Quãng đường: {current_s:6.1f}m | "
-                      f"Vị trí: ({x_obs:6.2f}, {y_obs:6.2f}) | {pos_desc}")
+                if actor is not None:
+                    if is_vehicle:
+                        actor.apply_control(carla.VehicleControl(hand_brake=True, throttle=0.0, brake=1.0))
 
-                obstacle_counter += 1
-            else:
-                print(f"  [!] Thử spawn tại s={current_s:.1f}m bị trùng lặp/vướng địa hình, tiếp tục...")
+                    self.spawned_obstacles.append(actor)
 
-            # Khoảng cách giữa các vật cản tối thiểu OBSTACLE_MIN_DISTANCE_M (50m)
-            current_s += OBSTACLE_MIN_DISTANCE_M + random.uniform(5.0, 15.0)
+                    cluster_tag = f" [Cụm {cluster_size} vật cản, #{c_i + 1}]" if cluster_size > 1 else ""
+                    pos_desc = "TRÊN QUỸ ĐẠO (tim đường)" if abs(d_lat) < 0.1 else (
+                        f"GẦN QUỸ ĐẠO (lệch phải +{d_lat:.1f}m)" if d_lat > 0 else f"GẦN QUỸ ĐẠO (lệch trái {d_lat:.1f}m)"
+                    )
+
+                    record = {
+                        'index': obstacle_counter,
+                        'actor_id': actor.id,
+                        'type': bp.id,
+                        'is_vehicle': is_vehicle,
+                        'x': round(x_obs, 2),
+                        'y': round(y_obs, 2),
+                        'z': round(spawn_z, 2),
+                        's_distance': round(obs_s, 1),
+                        'lateral_offset': d_lat,
+                        'position_type': pos_desc + cluster_tag
+                    }
+                    self.obstacle_records.append(record)
+
+                    print(f"  [{obstacle_counter:02d}] Đã tạo: {bp.id:<30} | Quãng đường: {obs_s:6.1f}m | "
+                          f"Vị trí: ({x_obs:6.2f}, {y_obs:6.2f}) | {pos_desc}{cluster_tag}")
+
+                    obstacle_counter += 1
+                else:
+                    print(f"  [!] Thử spawn tại s={obs_s:.1f}m bị trùng lặp/vướng địa hình, bỏ qua...")
+
+            # Khoảng cách giữa các CỤM vật cản liên tiếp
+            last_cluster_s = current_s + (cluster_size - 1) * OBSTACLE_CLUSTER_SPACING_M
+            current_s = last_cluster_s + OBSTACLE_MIN_DISTANCE_M + random.uniform(2.0, 8.0)
 
         # 4. Vẽ Marker 3D cảnh báo trong CARLA (hiển thị trên đầu mỗi vật cản)
         self.draw_debug_markers(life_time=OBSTACLE_PREVIEW_DURATION_SEC + 10.0)
@@ -256,17 +285,24 @@ def main():
     print("[CARLA] Đang hiển thị quỹ đạo 3D tham chiếu...")
     manager.carla_sim.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=OBSTACLE_PREVIEW_DURATION_SEC + 10.0)
 
-    # Đặt góc nhìn quan sát Spectator nhìn bao quát từ trên cao tại vị trí 1/3 quỹ đạo
+    # Đặt góc nhìn quan sát Spectator nhìn bao quát từ trên cao tại vị trí bắt đầu có vật cản
     s_accum = [0.0]
     for i in range(1, len(x_traj)):
         s_accum.append(s_accum[-1] + math.hypot(x_traj[i] - x_traj[i - 1], y_traj[i] - y_traj[i - 1]))
-    idx_1_3 = int(np.searchsorted(s_accum, s_accum[-1] * OBSTACLE_START_TRAJECTORY_FRACTION))
+    
+    if OBSTACLE_START_DISTANCE_M is not None:
+        start_s = min(float(OBSTACLE_START_DISTANCE_M), s_accum[-1] * 0.9)
+    elif OBSTACLE_START_TRAJECTORY_FRACTION is not None:
+        start_s = s_accum[-1] * OBSTACLE_START_TRAJECTORY_FRACTION
+    else:
+        start_s = 25.0
+    idx_start = int(np.searchsorted(s_accum, start_s))
     manager.carla_sim.set_spectator(
-        x=x_traj[idx_1_3],
-        y=y_traj[idx_1_3],
+        x=x_traj[idx_start],
+        y=y_traj[idx_start],
         z=45.0,
         pitch=-75.0,
-        yaw=math.degrees(theta_traj[idx_1_3])
+        yaw=math.degrees(theta_traj[idx_start])
     )
 
     # 4. Sinh các vật cản tĩnh theo cấu hình

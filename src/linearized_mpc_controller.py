@@ -51,6 +51,45 @@ class LinearizedMpcController:
         self.last_cost = 0.0
         self.is_success = False
 
+        # Quỹ đạo tim đường toàn cục để tra cứu chính xác vị trí tim đường tại các khúc cua
+        self.x_traj = None
+        self.y_traj = None
+        self.theta_traj = None
+
+    def set_global_trajectory(self, x_traj, y_traj, theta_traj):
+        """Thiết lập quỹ đạo toàn cục để định vị tim đường chuẩn xác, không bị méo góc khi vào cua"""
+        self.x_traj = np.array(x_traj)
+        self.y_traj = np.array(y_traj)
+        self.theta_traj = np.array(theta_traj)
+
+    def calculate_lateral_to_road(self, x_obs, y_obs, x_ref=None, y_ref=None, theta_ref=None):
+        """
+        Tính khoảng cách vuông góc d_lat_road từ vật cản (x_obs, y_obs) đến tim đường:
+        - Sử dụng quỹ đạo toàn cục self.x_traj nếu có, hoặc đoạn chân trời x_ref.
+        - Trả về: (d_lat_road, nx, ny, idx_match)
+          + d_lat_road > 0: Vật cản nằm bên PHẢI tim đường (+Y trong hệ tọa độ CARLA).
+          + d_lat_road < 0: Vật cản nằm bên TRÁI tim đường (-Y trong hệ tọa độ CARLA).
+        """
+        if self.x_traj is not None and len(self.x_traj) > 0:
+            dists_sq = (self.x_traj - x_obs) ** 2 + (self.y_traj - y_obs) ** 2
+            idx = int(np.argmin(dists_sq))
+            xr = self.x_traj[idx]
+            yr = self.y_traj[idx]
+            th = self.theta_traj[idx]
+        elif x_ref is not None and len(x_ref) > 0:
+            dists_sq = (x_ref - x_obs) ** 2 + (y_ref - y_obs) ** 2
+            idx = int(np.argmin(dists_sq))
+            xr = x_ref[idx]
+            yr = y_ref[idx]
+            th = theta_ref[idx]
+        else:
+            return 0.0, 0.0, 1.0, 0
+
+        nx = -math.sin(th)
+        ny = math.cos(th)
+        d_lat_road = nx * (x_obs - xr) + ny * (y_obs - yr)
+        return d_lat_road, nx, ny, idx
+
     def _eval_discrete_dynamics(self, x, u):
         """Tính toán trạng thái tiếp theo theo mô hình động học xe đạp phi tuyến"""
         pos_x, pos_y, theta, v = x[0], x[1], x[2], x[3]
@@ -97,13 +136,117 @@ class LinearizedMpcController:
         self.u_nom = np.zeros((2, self.horizon))
 
         self.x_nom[:, 0] = x_init
+        curr_v = float(x_init[3])
         for k in range(self.horizon):
             self.x_nom[0, k + 1] = x_ref[k]
             self.x_nom[1, k + 1] = y_ref[k]
             self.x_nom[2, k + 1] = theta_ref[k]
-            self.x_nom[3, k + 1] = v_ref[k]
+            # Mượt hóa danh định tốc độ (tăng tốc dần từ vận tốc hiện tại, tránh sốc gia tốc)
+            curr_v = min(curr_v + 3.0 * self.dt, float(v_ref[k]))
+            self.x_nom[3, k + 1] = max(curr_v, float(v_ref[k]) if x_init[3] > float(v_ref[k]) else curr_v)
             self.u_nom[0, k] = 0.0
             self.u_nom[1, k] = 0.0
+
+    @staticmethod
+    def extract_obstacle_points(obs):
+        """
+        Trích xuất tập hợp các điểm biểu diễn hình thể/bề mặt của vật cản (Sample Points / Point Cloud):
+        - Hỗ trợ cả điểm tiếp xúc bề mặt gần nhất, các điểm góc của hộp bao OBB (trong mô phỏng),
+          lẫn mảng điểm quét từ LiDAR 2D Point Cloud / Siêu âm (khi triển khai trên xe RC giai đoạn 2).
+        """
+        pts = []
+        if 'x' in obs and 'y' in obs:
+            pts.append((obs['x'], obs['y']))
+
+        # Nếu có thông tin Bounding Box (OBB) từ Detector
+        if 'center_x' in obs and 'extent_x' in obs:
+            cx = obs['center_x']
+            cy = obs['center_y']
+            hl = obs.get('extent_x', 0.6)
+            hw = obs.get('extent_y', 0.6)
+            yaw = obs.get('box_yaw', 0.0)
+            cos_y = math.cos(yaw)
+            sin_y = math.sin(yaw)
+
+            pts.append((cx, cy))
+            for dx, dy in [(-hl, -hw), (-hl, hw), (hl, -hw), (hl, hw), (0.0, -hw), (0.0, hw)]:
+                pts.append((
+                    cx + dx * cos_y - dy * sin_y,
+                    cy + dx * sin_y + dy * cos_y
+                ))
+
+        # Nếu có danh sách điểm bề mặt quét từ LiDAR Point Cloud (cho xe RC)
+        if 'surface_points' in obs and obs['surface_points']:
+            pts.extend(obs['surface_points'])
+
+        return pts
+
+    def analyze_spatial_occupancy(self, primary_obs, candidate_obstacles, x_ref, y_ref, theta_ref):
+        """
+        Thuật toán Phân tích Độ chiếm dụng Không gian & Khoảng trống Khả dụng (Spatial Occupancy & Clearance Analysis):
+        - Giải quyết triệt để edge case: vật cản có 1 phần nhỏ chớm sang một bên tim đường,
+          nhưng phần lớn khối tích/đuôi xe hoặc các vật cản kế tiếp trong cụm lại nằm dạt sang bên còn lại.
+        - Trả về: (side_sign, A_shift, span_left, span_right)
+        """
+        # 1. Thu thập tất cả các điểm biểu diễn của primary_obs và các vật cản lân cận trong cụm (cách dưới 6m)
+        all_pts = self.extract_obstacle_points(primary_obs)
+        if candidate_obstacles:
+            p_dist = primary_obs.get('dist', 10.0)
+            for c_obs in candidate_obstacles:
+                if c_obs.get('id') != primary_obs.get('id'):
+                    if abs(c_obs.get('dist', p_dist) - p_dist) <= 6.0:
+                        all_pts.extend(self.extract_obstacle_points(c_obs))
+
+        # 2. Chiếu tất cả các điểm lên tim đường để xác định độ chiếm dụng không gian hai bên làn
+        d_lats = []
+        for px, py in all_pts:
+            d_lat, _, _, _ = self.calculate_lateral_to_road(px, py, x_ref, y_ref, theta_ref)
+            d_lats.append(d_lat)
+
+        if not d_lats:
+            d_lats = [0.0]
+
+        d_lat_min = min(d_lats)  # Mép lấn sang TRÁI nhất (< 0 nếu sang trái)
+        d_lat_max = max(d_lats)  # Mép lấn sang PHẢI nhất (> 0 nếu sang phải)
+        d_lat_mean = float(np.mean(d_lats))
+
+        # Độ lấn sâu của bề mặt sang hai bên tim đường
+        span_left = max(0.0, -d_lat_min)
+        span_right = max(0.0, d_lat_max)
+
+        # 3. Tiêu chí phân luồng tối ưu (Dominant Clearance Rule):
+        # CARLA / Road Frame:
+        # - d_lat > 0: Bên PHẢI tim đường -> Xe né sang TRÁI (-nx, -ny) -> side_sign = -1.0
+        # - d_lat < 0: Bên TRÁI tim đường -> Xe né sang PHẢI (+nx, +ny) -> side_sign = +1.0
+        bias = span_right - span_left
+        if bias > 0.20:
+            # Chiếm dụng bên PHẢI lớn hơn hẳn bên TRÁI -> Làn TRÁI thông thoáng -> Né TRÁI
+            side_sign = -1.0
+        elif bias < -0.20:
+            # Chiếm dụng bên TRÁI lớn hơn hẳn bên PHẢI -> Làn PHẢI thông thoáng -> Né PHẢI
+            side_sign = 1.0
+        else:
+            # Cân bằng hoặc đối xứng quanh tim đường -> Dùng trọng tâm d_lat_mean hoặc cấu hình ưu tiên
+            if d_lat_mean > 0.15:
+                side_sign = -1.0
+            elif d_lat_mean < -0.15:
+                side_sign = 1.0
+            else:
+                side_sign = -1.0 if OBSTACLE_PREFER_BYPASS_SIDE == 'left' else 1.0
+
+        # 4. Tính toán biên độ dời làn thích ứng (Adaptive Clearance A_shift):
+        # Đảm bảo thân xe (nửa rộng ~1.0m + lề an toàn) cách mép ngoài cùng của vật cản một khoảng an toàn
+        if side_sign < 0:
+            # Né TRÁI: mép vật cản gần làn né nhất là span_left
+            A_shift = max(1.95, span_left + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
+        else:
+            # Né PHẢI: mép vật cản gần làn né nhất là span_right
+            A_shift = max(1.95, span_right + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
+
+        # Giới hạn A_shift tối đa để không bao giờ lao ra khỏi lòng đường (tối đa 2.40m)
+        A_shift = min(A_shift, 2.40)
+
+        return side_sign, A_shift, span_left, span_right
 
     def compute_local_reference_shift(self, x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles):
         """
@@ -116,6 +259,8 @@ class LinearizedMpcController:
         """
         tx0 = math.cos(theta_ref[0])
         ty0 = math.sin(theta_ref[0])
+        nx0 = -ty0
+        ny0 = tx0
         x_ego, y_ego = x_init[0], x_init[1]
 
         # 1. Kiểm tra trạng thái của vật cản đang né hiện tại (nếu có)
@@ -123,10 +268,58 @@ class LinearizedMpcController:
             x_o = self.active_obstacle['x']
             y_o = self.active_obstacle['y']
             # Tiến độ dọc của xe so với vật cản
-            progress_ego = tx0 * (x_ego - x_o) + ty0 * (y_ego - y_o)
+            if self.x_traj is not None and len(self.x_traj) > 0:
+                _, _, _, idx_ego = self.calculate_lateral_to_road(x_ego, y_ego)
+                _, _, _, idx_o = self.calculate_lateral_to_road(x_o, y_o)
+                progress_ego = (idx_ego - idx_o) * 0.1
+            else:
+                progress_ego = tx0 * (x_ego - x_o) + ty0 * (y_ego - y_o)
 
-            # Nếu xe đã vượt qua vật cản hơn 14m và đã nhập làn xong -> Giải phóng trạng thái né
-            if progress_ego > 14.0:
+            # Chaining cho cụm nhiều vật cản gần nhau (Obstacle Cluster Chaining):
+            # Nếu xe đã bắt đầu vượt qua vật cản hiện tại (progress_ego >= 0.0)
+            # kiểm tra xem phía trước có vật cản tiếp theo trong cụm hay không.
+            if progress_ego >= 0.0 and detected_obstacles:
+                next_cluster_obs = []
+                for obs in detected_obstacles:
+                    if obs.get('id') == self.active_obstacle.get('id'):
+                        continue
+                    d_long_ego = tx0 * (obs['x'] - x_ego) + ty0 * (obs['y'] - y_ego)
+                    d_lat_road, _, _, _ = self.calculate_lateral_to_road(obs['x'], obs['y'], x_ref, y_ref, theta_ref)
+                    # Vật cản phía trước xe (0.3m đến 20m) và nằm trong phạm vi lòng đường (tối thiểu +-2.6m)
+                    if 0.3 <= d_long_ego <= 20.0 and abs(d_lat_road) <= max(2.6, OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M + 1.0):
+                        next_cluster_obs.append(obs)
+
+                if next_cluster_obs:
+                    next_obs = min(next_cluster_obs, key=lambda o: math.hypot(o['x'] - x_ego, o['y'] - y_ego))
+                    preserved_side = self.active_obstacle['side_sign']
+
+                    # Cập nhật A_shift thích ứng theo độ chiếm dụng thực tế của vật cản kế tiếp
+                    _, new_A_shift, _, _ = self.analyze_spatial_occupancy(
+                        next_obs, next_cluster_obs, x_ref, y_ref, theta_ref
+                    )
+                    new_A_shift = max(new_A_shift, self.active_obstacle['A_shift'])
+                    r_safe = next_obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
+
+                    self.active_obstacle = {
+                        'id': next_obs.get('id'),
+                        'type': next_obs.get('type'),
+                        'x': next_obs['x'],
+                        'y': next_obs['y'],
+                        'radius': next_obs['radius'],
+                        'r_safe': r_safe,
+                        'side_sign': preserved_side,
+                        'A_shift': new_A_shift
+                    }
+                    x_o = self.active_obstacle['x']
+                    y_o = self.active_obstacle['y']
+                    if self.x_traj is not None and len(self.x_traj) > 0:
+                        _, _, _, idx_o = self.calculate_lateral_to_road(x_o, y_o)
+                        progress_ego = (idx_ego - idx_o) * 0.1
+                    else:
+                        progress_ego = tx0 * (x_ego - x_o) + ty0 * (y_ego - y_o)
+
+            # Nếu xe đã vượt qua vật cản hơn 11m và đã nhập làn xong -> Giải phóng trạng thái né
+            if progress_ego > 11.0:
                 self.active_obstacle = None
             else:
                 # Nếu vật cản vẫn còn nhìn thấy phía trước (xe chưa qua ngang hàng), cập nhật nhẹ vị trí nếu có
@@ -140,23 +333,23 @@ class LinearizedMpcController:
         # 2. Nếu chưa có vật cản nào đang né, tìm kiếm vật cản nguy hiểm mới từ cảm biến
         if self.active_obstacle is None:
             if detected_obstacles and len(detected_obstacles) > 0:
-                crit_obs = [
-                    obs for obs in detected_obstacles
-                    if 0.0 <= obs['d_long'] <= 22.0 and
-                       abs(obs['d_lat']) <= (OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M + 0.6)
-                ]
+                crit_obs = []
+                for obs in detected_obstacles:
+                    d_long_ego = tx0 * (obs['x'] - x_ego) + ty0 * (obs['y'] - y_ego)
+                    d_lat_road, _, _, _ = self.calculate_lateral_to_road(obs['x'], obs['y'], x_ref, y_ref, theta_ref)
+                    # Vật cản nguy hiểm nằm trong phạm vi lòng đường (+-2.6m)
+                    if 0.0 <= d_long_ego <= 22.0 and abs(d_lat_road) <= max(2.6, OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M + 0.8):
+                        crit_obs.append(obs)
+
                 if crit_obs:
-                    primary_obs = min(crit_obs, key=lambda o: o['dist'])
-                    d_lat_obs = primary_obs['d_lat']
-                    if d_lat_obs < -0.15:
-                        side_sign = 1.0   # né sang TRÁI
-                    elif d_lat_obs > 0.15:
-                        side_sign = -1.0  # né sang PHẢI
-                    else:
-                        side_sign = 1.0 if OBSTACLE_PREFER_BYPASS_SIDE == 'left' else -1.0
+                    primary_obs = min(crit_obs, key=lambda o: math.hypot(o['x'] - x_ego, o['y'] - y_ego))
+                    
+                    # Thuật toán Phân tích Độ chiếm dụng Không gian & Khoảng trống Khả dụng (Spatial Occupancy)
+                    side_sign, A_shift, span_left, span_right = self.analyze_spatial_occupancy(
+                        primary_obs, crit_obs, x_ref, y_ref, theta_ref
+                    )
 
                     r_safe = primary_obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
-                    A_shift = max(r_safe + 0.45, 1.95)
 
                     self.active_obstacle = {
                         'id': primary_obs.get('id'),
@@ -203,13 +396,13 @@ class LinearizedMpcController:
                     w = 0.5 * (1.0 + math.cos(math.pi * (dist_before - 2.0) / 20.0))
                 else:
                     w = 0.0
-            elif -2.0 <= progress_k <= 3.5:
-                # Giai đoạn chạy ngang qua vật cản: GIỮ NGUYÊN HOÀN TOÀN LÀN NÉ
+            elif -2.0 <= progress_k <= 4.0:
+                # Giai đoạn chạy ngang qua vật cản: GIỮ NGUYÊN HOÀN TOÀN LÀN NÉ (thoát hẳn đuôi xe)
                 w = 1.0
-            elif 3.5 < progress_k <= 14.0:
-                # Giai đoạn vượt qua xong: đánh lái từ từ trả lại tim đường
-                dist_after = progress_k - 3.5
-                w = 0.5 * (1.0 + math.cos(math.pi * dist_after / 10.5))
+            elif 4.0 < progress_k <= 10.5:
+                # Giai đoạn vượt qua xong: đánh lái từ từ trả lại tim đường (trong quãng đường 6.5m gọn gàng, dứt khoát)
+                dist_after = progress_k - 4.0
+                w = 0.5 * (1.0 + math.cos(math.pi * dist_after / 6.5))
             else:
                 w = 0.0
 
@@ -239,7 +432,8 @@ class LinearizedMpcController:
         opts = {
             'ipopt.print_level': 0,
             'print_time': 0,
-            'ipopt.max_cpu_time': self.dt * 0.9,
+            'ipopt.max_cpu_time': 1.5,
+            'ipopt.max_iter': 40,
             'ipopt.tol': 1e-4
         }
         opti.solver('ipopt', opts)
@@ -316,44 +510,60 @@ class LinearizedMpcController:
         # RÀNG BUỘC NÉ VẬT CẢN DẠNG TIẾP DIỆN PHÂN CÁCH TUYẾN TÍNH HÓA & BIẾN BÙ SLACK
         # =====================================================================
         if obstacles and len(obstacles) > 0:
-            active_obs = obstacles[:3]
+            # Chỉ áp dụng siêu phẳng an toàn cho các vật cản ở phía trước hoặc ngang xe (d_long >= -0.8m)
+            # Loại bỏ các vật cản đã đi qua sau đuôi xe để tránh siêu phẳng ngược chiều gây xung đột
+            tx_ego = math.cos(x_init[2])
+            ty_ego = math.sin(x_init[2])
+            ahead_obs = [
+                obs for obs in obstacles
+                if (tx_ego * (obs['x'] - x_init[0]) + ty_ego * (obs['y'] - x_init[1])) >= -0.8
+            ]
+            active_obs = ahead_obs[:2]
             num_obs = len(active_obs)
 
-            # Khởi tạo ma trận biến bù Slack Variable
-            eps_slack = opti.variable(num_obs, self.horizon)
-            opti.subject_to(eps_slack >= 0)
+            if num_obs > 0:
+                # Khởi tạo ma trận biến bù Slack Variable
+                eps_slack = opti.variable(num_obs, self.horizon)
+                opti.subject_to(ca.vec(eps_slack) >= 0)
 
-            for m, obs in enumerate(active_obs):
-                x_o = obs['x']
-                y_o = obs['y']
-                r_safe = obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
+                for m, obs in enumerate(active_obs):
+                    x_o = obs['x']
+                    y_o = obs['y']
+                    r_safe = obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
 
-                for k in range(self.horizon):
-                    x_bar_k = self.x_nom[0, k]
-                    y_bar_k = self.x_nom[1, k]
-                    dx_nom = x_bar_k - x_o
-                    dy_nom = y_bar_k - y_o
-                    dist_nom = math.sqrt(dx_nom ** 2 + dy_nom ** 2) + 1e-4
+                    for k in range(self.horizon):
+                        x_bar_k = self.x_nom[0, k]
+                        y_bar_k = self.x_nom[1, k]
+                        dx_nom = x_bar_k - x_o
+                        dy_nom = y_bar_k - y_o
+                        dist_nom = math.sqrt(dx_nom ** 2 + dy_nom ** 2) + 1e-4
 
-                    # Chỉ kích hoạt mặt phẳng tiếp tuyến phân cách khi xe ở gần vật cản
-                    if dist_nom <= r_safe + 5.0:
-                        nx_bar = dx_nom / dist_nom
-                        ny_bar = dy_nom / dist_nom
+                        # Chỉ kích hoạt mặt phẳng tiếp tuyến phân cách khi xe ở gần vật cản
+                        if dist_nom <= r_safe + 5.0:
+                            nx_bar = dx_nom / dist_nom
+                            ny_bar = dy_nom / dist_nom
 
-                        # Ràng buộc siêu phẳng tiếp diện nửa không gian an toàn (Supporting Hyperplane):
-                        # nx_bar * (X[0,k] - x_o) + ny_bar * (X[1,k] - y_o) + eps_slack >= r_safe
-                        lhs = nx_bar * (X[0, k] - x_o) + ny_bar * (X[1, k] - y_o) + eps_slack[m, k]
-                        opti.subject_to(lhs >= r_safe)
+                            # Ràng buộc siêu phẳng tiếp diện nửa không gian an toàn (Supporting Hyperplane):
+                            # nx_bar * (X[0,k] - x_o) + ny_bar * (X[1,k] - y_o) + eps_slack >= r_safe
+                            lhs = nx_bar * (X[0, k] - x_o) + ny_bar * (X[1, k] - y_o) + eps_slack[m, k]
+                            opti.subject_to(lhs >= r_safe)
 
-                        # Phạt vi phạm vùng an toàn
-                        cost += MPC_W_SLACK * (eps_slack[m, k] ** 2) + MPC_W_SLACK_LINEAR * eps_slack[m, k]
+                            # Phạt vi phạm vùng an toàn
+                            cost += MPC_W_SLACK * (eps_slack[m, k] ** 2) + MPC_W_SLACK_LINEAR * eps_slack[m, k]
 
         opti.minimize(cost)
 
-        sol = opti.solve()
-        x_opt = sol.value(X)
-        u_opt = sol.value(U)
-        cost_opt = float(sol.value(cost))
+        try:
+            sol = opti.solve()
+            x_opt = sol.value(X)
+            u_opt = sol.value(U)
+            cost_opt = float(sol.value(cost))
+        except Exception:
+            # Thu hồi nghiệm tốt nhất (Best iterate) từ Ipopt thay vì để chương trình bị ngắt khựng xe
+            x_opt = opti.debug.value(X)
+            u_opt = opti.debug.value(U)
+            cost_opt = float(opti.debug.value(cost))
+
         return x_opt, u_opt, cost_opt
 
     def solve(self, x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles=None):
@@ -379,9 +589,14 @@ class LinearizedMpcController:
         # =====================================================================
         v_ref_adapted = np.copy(v_ref)
         if self.active_obstacle is not None:
-            tx0 = math.cos(theta_ref[0])
-            ty0 = math.sin(theta_ref[0])
-            progress_ego = tx0 * (x_init[0] - self.active_obstacle['x']) + ty0 * (x_init[1] - self.active_obstacle['y'])
+            if self.x_traj is not None and len(self.x_traj) > 0:
+                _, _, _, idx_ego = self.calculate_lateral_to_road(x_init[0], x_init[1])
+                _, _, _, idx_o = self.calculate_lateral_to_road(self.active_obstacle['x'], self.active_obstacle['y'])
+                progress_ego = (idx_ego - idx_o) * 0.1
+            else:
+                tx0 = math.cos(theta_ref[0])
+                ty0 = math.sin(theta_ref[0])
+                progress_ego = tx0 * (x_init[0] - self.active_obstacle['x']) + ty0 * (x_init[1] - self.active_obstacle['y'])
 
             if progress_ego < -2.0:
                 # Đang tiếp cận: giảm dần từ TARGET_SPEED_MS về OBSTACLE_CAUTION_SPEED_MS
@@ -391,14 +606,14 @@ class LinearizedMpcController:
                 v_safe = OBSTACLE_CAUTION_SPEED_MS + ratio * (base_speed - OBSTACLE_CAUTION_SPEED_MS)
                 v_ref_adapted = np.minimum(v_ref_adapted, v_safe)
                 v_ref_adapted = np.maximum(v_ref_adapted, OBSTACLE_CAUTION_SPEED_MS)
-            elif -2.0 <= progress_ego <= 3.5:
-                # Đang chạy ngang qua vật cản: duy trì vận tốc ổn định 3.0 m/s
+            elif -2.0 <= progress_ego <= 2.0:
+                # Đang chạy ngang qua vật cản: duy trì vận tốc an toàn ổn định (6.5 m/s)
                 v_ref_adapted = np.minimum(v_ref_adapted, OBSTACLE_CAUTION_SPEED_MS)
                 v_ref_adapted = np.maximum(v_ref_adapted, OBSTACLE_CAUTION_SPEED_MS)
             else:
-                # Đang nhập làn trở lại: tăng tốc mượt mà từ 3.0 m/s lên TARGET_SPEED_MS
-                return_dist = progress_ego - 3.5
-                ratio = np.clip(return_dist / 10.0, 0.0, 1.0)
+                # Ngay khi mũi xe qua vật cản: tăng tốc mượt mà từ OBSTACLE_CAUTION_SPEED_MS lên TARGET_SPEED_MS
+                return_dist = progress_ego - 2.0
+                ratio = np.clip(return_dist / 6.5, 0.0, 1.0)
                 v_ramp = OBSTACLE_CAUTION_SPEED_MS + ratio * (TARGET_SPEED_MS - OBSTACLE_CAUTION_SPEED_MS)
                 v_ref_adapted = np.minimum(v_ref_adapted, v_ramp)
 
@@ -412,8 +627,12 @@ class LinearizedMpcController:
                     all_obs.append(obs)
 
         # Khởi tạo / Đồng bộ lại nominal trajectory nếu chưa có hoặc vừa có độ lệch dời làn lớn
-        if self.x_nom is None or (has_shift and np.max(np.abs(self.x_nom[1, :self.horizon] - y_ref_mod)) > 1.2):
+        if self.x_nom is None:
             self.init_nominal_trajectory(x_init, x_ref_mod, y_ref_mod, theta_ref_mod, v_ref_adapted)
+        else:
+            max_dev = np.max(np.hypot(self.x_nom[0, 1:] - x_ref_mod, self.x_nom[1, 1:] - y_ref_mod))
+            if has_shift and max_dev > 1.2:
+                self.init_nominal_trajectory(x_init, x_ref_mod, y_ref_mod, theta_ref_mod, v_ref_adapted)
 
         x_opt = None
         u_opt = None
@@ -456,7 +675,7 @@ class LinearizedMpcController:
                 self.buffer_index += 1
             else:
                 steer_rad = 0.0
-                acc_m_s2 = -1.0  # Giảm tốc nhẹ an toàn, không phanh chết máy
+                acc_m_s2 = 0.5  # Duy trì gia tốc dương nhẹ để xe tiếp tục lăn bánh vượt qua, không phanh chết máy
 
             # Reset lại nominal trajectory
             self.init_nominal_trajectory(x_init, x_ref_mod, y_ref_mod, theta_ref_mod, v_ref_adapted)

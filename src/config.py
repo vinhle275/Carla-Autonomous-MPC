@@ -47,14 +47,21 @@ FINE_ACC_DOT_COEF = 10.0     # Phạt giật ga/phanh
 # --- CẤU HÌNH SINH VẬT CẢN (OBSTACLE GENERATION) ---
 # ==============================================================================
 ENABLE_OBSTACLES = False              # True: Tự động sinh vật cản; False: Chế độ thuần bám quỹ đạo (không sinh vật cản)
-OBSTACLE_START_TRAJECTORY_FRACTION = 1.0 / 3.0   # Bắt đầu xuất hiện từ 1/3 quỹ đạo trở đi
-OBSTACLE_END_TRAJECTORY_FRACTION = 0.95          # Giới hạn kết thúc sinh vật cản (trước 5% cuối)
-OBSTACLE_MIN_DISTANCE_M = 50.0                   # Khoảng cách tối thiểu giữa 2 vật cản liên tiếp (m)
-OBSTACLE_PREVIEW_DURATION_SEC = 60.0             # Thời gian vật cản tồn tại trước khi tự dọn dẹp (giây)
+OBSTACLE_START_DISTANCE_M = 25.0      # Bắt đầu xuất hiện từ mét thứ 25 của quỹ đạo (có thể thay đổi số này)
+OBSTACLE_START_TRAJECTORY_FRACTION = None  # (Tùy chọn fallback) Đặt None để ưu tiên dùng OBSTACLE_START_DISTANCE_M
+OBSTACLE_END_TRAJECTORY_FRACTION = 0.95    # Giới hạn kết thúc sinh vật cản (trước 5% cuối)
+OBSTACLE_MIN_DISTANCE_M = 50.0        # Khoảng cách tối thiểu giữa các CỤM vật cản liên tiếp (m)
+OBSTACLE_PREVIEW_DURATION_SEC = 60.0  # Thời gian vật cản tồn tại trước khi tự dọn dẹp (giây)
+
+# Cấu hình cụm vật cản gần nhau (Clustered Obstacles):
+ENABLE_OBSTACLE_CLUSTERS = True       # Bật sinh cụm vật cản gần nhau (2-3 vật cản chỉ cách nhau 2-3m)
+OBSTACLE_CLUSTER_SPACING_M = 2.5      # Khoảng cách giữa các vật cản trong CÙNG MỘT CỤM (2 - 3m)
+OBSTACLE_CLUSTER_CHANCE = 0.6         # Tỷ lệ sinh cụm nhiều vật cản (60% sinh cụm 2-3 vật cản, 40% sinh vật cản đơn)
+OBSTACLE_CLUSTER_SIZES = [2, 3]       # Kích thước cụm khi kích hoạt (ngẫu nhiên 2 hoặc 3 vật cản gần nhau)
 
 # Độ lệch ngang so với tim đường (m):
-# 0.0: Nằm trực tiếp TRÊN quỹ đạo; âm: lệch phải; dương: lệch trái (GẦN quỹ đạo)
-OBSTACLE_LATERAL_OFFSETS = [0.0, -1.2, 1.2, -0.8, 0.8]
+# 0.0: Nằm trực tiếp TRÊN quỹ đạo; dương (> 0): lệch phải (+Y); âm (< 0): lệch trái (-Y) (GẦN quỹ đạo)
+OBSTACLE_LATERAL_OFFSETS = [0.0, -1.5, 1.5, -0.8, 0.8]
 
 # Danh sách Blueprint các vật cản tĩnh phong phú (Cọc tiêu, rào chắn, thùng hàng, xe đỗ tĩnh)
 STATIC_OBSTACLE_BLUEPRINTS = [
@@ -71,10 +78,10 @@ STATIC_OBSTACLE_BLUEPRINTS = [
 # ==============================================================================
 # --- CẤU HÌNH CẢM BIẾN NHẬN THỨC VẬT CẢN (PERCEPTION / SENSOR) ---
 # ==============================================================================
-SENSOR_DETECTION_RANGE_M = 25.0       # Tầm quét xa tối đa của cảm biến trước xe (m)
+SENSOR_DETECTION_RANGE_M = 20.0       # Tầm quét xa tối đa của cảm biến trước xe (m)
 SENSOR_FOV_DEG = 120.0                 # Góc mở trường nhìn (Field of View - FOV) phía trước mũi xe (độ)
 SENSOR_SURROUND_RANGE_M = 10.0        # Tầm quét 360 độ của cảm biến cự ly gần (Ultrasonic / Blind-spot Radar quanh thân xe)
-SENSOR_TRACK_DROP_BEHIND_M = 5.0      # Khoảng cách sau lưng xe (m) để xóa vật cản khỏi Local Object Map
+SENSOR_TRACK_DROP_BEHIND_M = 3.0      # Khoảng cách sau lưng xe (m) để xóa vật cản khỏi Local Object Map
 OBSTACLE_DEFAULT_SAFETY_RADIUS_M = 2.0 # Bán kính an toàn mặc định bao quanh vật cản (m)
 OBSTACLE_PROP_SAFETY_RADIUS_M = 1.4    # Bán kính an toàn cho cọc tiêu, rào chắn, thùng hàng (m)
 OBSTACLE_VEHICLE_SAFETY_RADIUS_M = 2.3 # Bán kính an toàn cho xe ô tô đỗ tĩnh (m)
@@ -91,10 +98,10 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 # ==============================================================================
 # --- CẤU HÌNH THÍCH ỨNG TỐC ĐỘ KHI GẶP VẬT CẢN (ADAPTIVE SPEED GOVERNOR) ---
 # ==============================================================================
-OBSTACLE_CAUTION_SPEED_MS = 5.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~11 km/h - lướt êm, không chết máy)
+OBSTACLE_CAUTION_SPEED_MS = 6.5       # Vận tốc an toàn khi lách qua vật cản (m/s) (~23.4 km/h - lướt êm, thoát nhanh, không quá chậm)
 OBSTACLE_SLOWDOWN_DISTANCE_M = 10.0   # Khoảng cách bắt đầu giảm tốc êm (m)
-OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M = 2.0  # Chỉ giảm tốc nếu vật cản nằm trong hành lang tim đường +-2m
-OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
+OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M = 0.5  # Chỉ giảm tốc nếu vật cản nằm trong hành lang tim đường +-2m
+OBSTACLE_PREFER_BYPASS_SIDE = 'left'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
 
 
 

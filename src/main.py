@@ -67,6 +67,7 @@ def main():
     if USE_LINEARIZED_QP_MPC:
         print("[THUẬT TOÁN] Sử dụng Bộ điều khiển Tuyến tính hóa lặp (Slack QP-MPC).")
         mpc_controller = LinearizedMpcController(horizon=N, sample_time=dt)
+        mpc_controller.set_global_trajectory(x_traj, y_traj, theta_traj)
     else:
         print("[THUẬT TOÁN] Sử dụng Bộ điều khiển NMPC phi tuyến truyền thống.")
         mpc_controller = MpcController(horizon=N, dt=dt)
@@ -99,6 +100,7 @@ def main():
             logger.log_controller_input(x0, y0, v0, theta0, x_ref[0], y_ref[0], v_ref[0], theta_ref[0])
 
             # Giải bài toán tối ưu MPC (tùy theo loại bộ điều khiển)
+            t_solve_start = time.perf_counter()
             if USE_LINEARIZED_QP_MPC:
                 x_state = np.array([x0, y0, theta0, v0])
                 wheel_angle_rad, acceleration_m_s_2 = mpc_controller.solve(
@@ -120,6 +122,7 @@ def main():
                 mpc_controller.solve()
                 wheel_angle_rad, acceleration_m_s_2 = mpc_controller.get_controls_value()
                 cost_val = mpc_controller.get_optimized_cost()
+            solve_time_sec = time.perf_counter() - t_solve_start
 
             # Chuyển đổi tín hiệu điều khiển góc lái và gia tốc
             throttle, brake, steer = CarlaSimulator.process_control_inputs(
@@ -133,16 +136,21 @@ def main():
             calc_time = time.time() - start_time
             sleep_time = max(dt - calc_time, 0.0)
 
-            # Định dạng chuỗi trạng thái cảm biến
+            # Định dạng chuỗi trạng thái cảm biến và điều khiển né
+            bypass_info = ""
+            if hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
+                side_tag = "TRÁI" if mpc_controller.active_obstacle['side_sign'] < 0 else "PHẢI"
+                bypass_info = f" [NÉ {side_tag}]"
+
             if detected_obstacles:
                 nearest = detected_obstacles[0]
                 src_tag = nearest.get('source', 'obs')[:3].upper()
-                obs_status = f" | [!] OBS: {len(detected_obstacles)} [{src_tag}] (D:{nearest['dist']:.1f}m, Lat:{nearest['d_lat']:+.1f}m)"
+                obs_status = f" | [!] OBS: {len(detected_obstacles)} [{src_tag}] (D:{nearest['dist']:.1f}m, MũiXe:{nearest['d_lat']:+.1f}m){bypass_info}"
             else:
-                obs_status = " | OBS: 0"
+                obs_status = f" | OBS: 0{bypass_info}"
 
             print(f"Index: {current_idx}/{total_waypoints} | Pos: ({x0:.1f}, {y0:.1f}) | "
-                  f"Speed: {v0:.2f}/{v_ref[0]:.2f} m/s | Steer: {steer:.2f}{obs_status}", end="\r")
+                  f"Speed: {v0:.2f}/{v_ref[0]:.2f} m/s | Steer: {steer:.2f} | Solve: {solve_time_sec:.3f}s{obs_status}", end="\r")
 
             time.sleep(sleep_time)
 

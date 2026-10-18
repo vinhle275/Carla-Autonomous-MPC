@@ -7,7 +7,11 @@ from src.config import (
     SENSOR_FOV_DEG,
     SENSOR_SURROUND_RANGE_M,
     SENSOR_TRACK_DROP_BEHIND_M,
-    OBSTACLE_AVOIDANCE_MARGIN_M
+    OBSTACLE_AVOIDANCE_MARGIN_M,
+    DEBUG_DRAW_SENSOR_BEAMS,
+    DEBUG_DRAW_SENSOR_FOV,
+    DEBUG_DRAW_SURROUND_CIRCLE,
+    DEBUG_DRAW_OBSTACLE_BOX
 )
 from src.help_functions import normalize_angle
 
@@ -265,45 +269,47 @@ class ObstacleDetector:
         return final_obstacles
 
     def _draw_sensor_debug(self, sensor_origin, vehicle_center, yaw_ego, detected_obstacles, life_time):
-        """Vẽ tia quét FOV 120°, vòng quét 360° cự ly gần và các tia nhận diện trên màn hình CARLA"""
+        """Vẽ tia quét FOV 120°, vòng quét 360° cự ly gần và các tia nhận diện trên màn hình CARLA theo cấu hình"""
         debug = self.world.debug
 
-        # 1. Vẽ 2 tia biên hình quạt FOV 120° phía trước (màu xanh lá)
-        left_angle = yaw_ego + self.half_fov_rad
-        right_angle = yaw_ego - self.half_fov_rad
+        # 1. Vẽ 2 tia biên hình quạt FOV 120° phía trước (màu xanh lá) - Tắt nếu DEBUG_DRAW_SENSOR_FOV = False
+        if DEBUG_DRAW_SENSOR_FOV:
+            left_angle = yaw_ego + self.half_fov_rad
+            right_angle = yaw_ego - self.half_fov_rad
 
-        left_end = carla.Location(
-            x=sensor_origin.x + self.detection_range * math.cos(left_angle),
-            y=sensor_origin.y + self.detection_range * math.sin(left_angle),
-            z=sensor_origin.z
-        )
-        right_end = carla.Location(
-            x=sensor_origin.x + self.detection_range * math.cos(right_angle),
-            y=sensor_origin.y + self.detection_range * math.sin(right_angle),
-            z=sensor_origin.z
-        )
-
-        fov_color = carla.Color(0, 220, 100, 100)
-        debug.draw_line(sensor_origin, left_end, thickness=0.03, color=fov_color, life_time=life_time)
-        debug.draw_line(sensor_origin, right_end, thickness=0.03, color=fov_color, life_time=life_time)
-
-        # 2. Vẽ vòng bảo vệ cự ly gần 360° quanh thân xe (màu xanh dương nhạt)
-        num_circle_pts = 12
-        surround_pts = []
-        for i in range(num_circle_pts):
-            ang = 2.0 * math.pi * i / num_circle_pts
-            pt = carla.Location(
-                x=vehicle_center.x + self.surround_range * math.cos(ang),
-                y=vehicle_center.y + self.surround_range * math.sin(ang),
-                z=vehicle_center.z
+            left_end = carla.Location(
+                x=sensor_origin.x + self.detection_range * math.cos(left_angle),
+                y=sensor_origin.y + self.detection_range * math.sin(left_angle),
+                z=sensor_origin.z
             )
-            surround_pts.append(pt)
-        for i in range(num_circle_pts):
-            p1 = surround_pts[i]
-            p2 = surround_pts[(i + 1) % num_circle_pts]
-            debug.draw_line(p1, p2, thickness=0.02, color=carla.Color(0, 150, 255, 60), life_time=life_time)
+            right_end = carla.Location(
+                x=sensor_origin.x + self.detection_range * math.cos(right_angle),
+                y=sensor_origin.y + self.detection_range * math.sin(right_angle),
+                z=sensor_origin.z
+            )
 
-        # 3. Vẽ tia cảnh báo và điểm bề mặt cho từng vật cản
+            fov_color = carla.Color(0, 220, 100, 100)
+            debug.draw_line(sensor_origin, left_end, thickness=0.03, color=fov_color, life_time=life_time)
+            debug.draw_line(sensor_origin, right_end, thickness=0.03, color=fov_color, life_time=life_time)
+
+        # 2. Vẽ vòng bảo vệ cự ly gần 360° quanh thân xe - Tắt nếu DEBUG_DRAW_SURROUND_CIRCLE = False
+        if DEBUG_DRAW_SURROUND_CIRCLE:
+            num_circle_pts = 12
+            surround_pts = []
+            for i in range(num_circle_pts):
+                ang = 2.0 * math.pi * i / num_circle_pts
+                pt = carla.Location(
+                    x=vehicle_center.x + self.surround_range * math.cos(ang),
+                    y=vehicle_center.y + self.surround_range * math.sin(ang),
+                    z=vehicle_center.z
+                )
+                surround_pts.append(pt)
+            for i in range(num_circle_pts):
+                p1 = surround_pts[i]
+                p2 = surround_pts[(i + 1) % num_circle_pts]
+                debug.draw_line(p1, p2, thickness=0.02, color=carla.Color(0, 150, 255, 60), life_time=life_time)
+
+        # 3. Vẽ tia cảnh báo và hộp bao cho từng vật cản
         for obs in detected_obstacles:
             closest_loc = carla.Location(x=obs['x'], y=obs['y'], z=obs['z'] + 0.3)
             src = obs.get('source', 'front_fov')
@@ -321,28 +327,29 @@ class ObstacleDetector:
                 point_color = carla.Color(255, 0, 255)
                 status_txt = f"[MAP MEMORY: {obs['dist']:.1f}m]"
 
-            # Tia nối từ xe tới điểm bề mặt gần nhất
-            debug.draw_line(sensor_origin, closest_loc, thickness=0.08, color=beam_color, life_time=life_time)
-            debug.draw_point(closest_loc, size=0.20, color=point_color, life_time=life_time)
+            # Tia nối từ xe tới điểm bề mặt gần nhất - Chỉ vẽ nếu DEBUG_DRAW_SENSOR_BEAMS = True
+            if DEBUG_DRAW_SENSOR_BEAMS:
+                debug.draw_line(sensor_origin, closest_loc, thickness=0.06, color=beam_color, life_time=life_time)
+                debug.draw_point(closest_loc, size=0.15, color=point_color, life_time=life_time)
+                # Nhãn chữ hiển thị thông tin
+                text_loc = carla.Location(x=obs['x'], y=obs['y'], z=obs['z'] + 1.8)
+                info_str = f"{status_txt} | Lat: {obs['d_lat']:+.1f}m"
+                debug.draw_string(text_loc, info_str, draw_shadow=True, color=carla.Color(255, 255, 0), life_time=life_time)
 
-            # Vẽ khung Bounding Box 3D
-            try:
-                actor = obs['actor']
-                if hasattr(actor, 'bounding_box') and actor.bounding_box is not None:
-                    bb = actor.bounding_box
-                    bb_tf = actor.get_transform()
-                    debug.draw_box(
-                        carla.BoundingBox(bb_tf.location + bb.location, bb.extent),
-                        bb_tf.rotation,
-                        thickness=0.05,
-                        color=carla.Color(0, 180, 255, 120),
-                        life_time=life_time
-                    )
-            except Exception:
-                pass
-
-            # Nhãn chữ hiển thị thông tin
-            text_loc = carla.Location(x=obs['x'], y=obs['y'], z=obs['z'] + 1.8)
-            info_str = f"{status_txt} | Lat: {obs['d_lat']:+.1f}m"
-            debug.draw_string(text_loc, info_str, draw_shadow=True, color=carla.Color(255, 255, 0), life_time=life_time)
+            # Vẽ khung Bounding Box 3D nhẹ nhàng để biết vị trí vật cản
+            if DEBUG_DRAW_OBSTACLE_BOX:
+                try:
+                    actor = obs['actor']
+                    if hasattr(actor, 'bounding_box') and actor.bounding_box is not None:
+                        bb = actor.bounding_box
+                        bb_tf = actor.get_transform()
+                        debug.draw_box(
+                            carla.BoundingBox(bb_tf.location + bb.location, bb.extent),
+                            bb_tf.rotation,
+                            thickness=0.04,
+                            color=carla.Color(0, 180, 255, 100),
+                            life_time=life_time
+                        )
+                except Exception:
+                    pass
 

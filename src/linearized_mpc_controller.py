@@ -11,7 +11,9 @@ from src.config import (
     MPC_MAX_LINEARIZATION_ITER, MPC_W_SLACK, MPC_W_SLACK_LINEAR,
     OBSTACLE_AVOIDANCE_MARGIN_M,
     OBSTACLE_CAUTION_SPEED_MS, OBSTACLE_SLOWDOWN_DISTANCE_M,
-    OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M, OBSTACLE_PREFER_BYPASS_SIDE
+    OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M, OBSTACLE_PREFER_BYPASS_SIDE,
+    OBSTACLE_APPROACH_RAMP_M, OBSTACLE_APPROACH_MARGIN_M,
+    OBSTACLE_HOLD_DISTANCE_M, OBSTACLE_RETURN_RAMP_M
 )
 from src.help_functions import calculate_lateral_deviation, normalize_angle
 
@@ -244,7 +246,7 @@ class LinearizedMpcController:
             A_shift = max(1.95, span_right + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
 
         # Giới hạn A_shift tối đa để vừa đủ thoát cụm vật cản mà không lao ra ngoài lề đường (tối đa 3.60m)
-        A_shift = min(A_shift, 4.0)
+        A_shift = min(A_shift, 3.6)
 
         return side_sign, A_shift, span_left, span_right
 
@@ -269,7 +271,7 @@ class LinearizedMpcController:
             for obs in detected_obstacles:
                 d_long_ego = tx0 * (obs['x'] - x_ego) + ty0 * (obs['y'] - y_ego)
                 d_lat_road, _, _, _ = self.calculate_lateral_to_road(obs['x'], obs['y'], x_ref, y_ref, theta_ref)
-                if 0.0 <= d_long_ego <= 26.0 and abs(d_lat_road) <= 4.2:
+                if 0.0 <= d_long_ego <= 26.0 and abs(d_lat_road) <= OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M:
                     obs_c = dict(obs)
                     obs_c['d_long_ego'] = d_long_ego
                     obs_c['d_lat_road'] = d_lat_road
@@ -339,8 +341,9 @@ class LinearizedMpcController:
                     else:
                         progress_ego = tx0 * (x_ego - x_o) + ty0 * (y_ego - y_o)
 
-            # Nếu xe đã vượt qua vật cản hơn 11m và đã nhập làn xong -> Giải phóng trạng thái né
-            if progress_ego > 11.0:
+            # Nếu xe đã vượt qua vật cản hơn tổng đoạn né và đã nhập làn xong -> Giải phóng trạng thái né
+            release_distance = OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M + 1.0
+            if progress_ego > release_distance:
                 self.active_obstacle = None
             else:
                 if progress_ego < 0.0 and detected_obstacles:
@@ -392,20 +395,23 @@ class LinearizedMpcController:
             # Tọa độ dọc của waypoint k so với vật cản
             progress_k = tx_k * (x_ref[k] - x_o) + ty_k * (y_ref[k] - y_o)
 
-            if progress_k < -2.0:
-                # Giai đoạn tiếp cận: mở góc lái dứt khoát trong 11m (từ -13m đến -2m)
+            app_start = OBSTACLE_APPROACH_RAMP_M + OBSTACLE_APPROACH_MARGIN_M
+            ret_end = OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M
+
+            if progress_k < -OBSTACLE_APPROACH_MARGIN_M:
+                # Giai đoạn tiếp cận: mở góc lái chuyển làn thoai thoải theo hàm cosine
                 dist_before = -progress_k
-                if dist_before <= 13.0:
-                    w = 0.5 * (1.0 + math.cos(math.pi * (dist_before - 2.0) / 11.0))
+                if dist_before <= app_start:
+                    w = 0.5 * (1.0 + math.cos(math.pi * (dist_before - OBSTACLE_APPROACH_MARGIN_M) / OBSTACLE_APPROACH_RAMP_M))
                 else:
                     w = 0.0
-            elif -2.0 <= progress_k <= 4.0:
+            elif -OBSTACLE_APPROACH_MARGIN_M <= progress_k <= OBSTACLE_HOLD_DISTANCE_M:
                 # Giai đoạn chạy ngang qua vật cản: GIỮ NGUYÊN HOÀN TOÀN LÀN NÉ (thoát hẳn đuôi xe)
                 w = 1.0
-            elif 4.0 < progress_k <= 10.5:
-                # Giai đoạn vượt qua xong: đánh lái từ từ trả lại tim đường (trong quãng đường 6.5m gọn gàng, dứt khoát)
-                dist_after = progress_k - 4.0
-                w = 0.5 * (1.0 + math.cos(math.pi * dist_after / 6.5))
+            elif OBSTACLE_HOLD_DISTANCE_M < progress_k <= ret_end:
+                # Giai đoạn vượt qua xong: đánh lái từ từ trả lại tim đường (trong quãng đường OBSTACLE_RETURN_RAMP_M)
+                dist_after = progress_k - OBSTACLE_HOLD_DISTANCE_M
+                w = 0.5 * (1.0 + math.cos(math.pi * dist_after / OBSTACLE_RETURN_RAMP_M))
             else:
                 w = 0.0
 
@@ -601,7 +607,7 @@ class LinearizedMpcController:
                 ty0 = math.sin(theta_ref[0])
                 progress_ego = tx0 * (x_init[0] - self.active_obstacle['x']) + ty0 * (x_init[1] - self.active_obstacle['y'])
 
-            if progress_ego < -2.0:
+            if progress_ego < -OBSTACLE_APPROACH_MARGIN_M:
                 # Đang tiếp cận: giảm dần từ TARGET_SPEED_MS về OBSTACLE_CAUTION_SPEED_MS
                 dist_to_obs = -progress_ego
                 ratio = np.clip((dist_to_obs - 4.0) / (OBSTACLE_SLOWDOWN_DISTANCE_M - 4.0), 0.0, 1.0)
@@ -609,14 +615,14 @@ class LinearizedMpcController:
                 v_safe = OBSTACLE_CAUTION_SPEED_MS + ratio * (base_speed - OBSTACLE_CAUTION_SPEED_MS)
                 v_ref_adapted = np.minimum(v_ref_adapted, v_safe)
                 v_ref_adapted = np.maximum(v_ref_adapted, OBSTACLE_CAUTION_SPEED_MS)
-            elif -2.0 <= progress_ego <= 2.0:
-                # Đang chạy ngang qua vật cản: duy trì vận tốc an toàn ổn định (6.5 m/s)
+            elif -OBSTACLE_APPROACH_MARGIN_M <= progress_ego <= 2.0:
+                # Đang chạy ngang qua vật cản: duy trì vận tốc an toàn ổn định (OBSTACLE_CAUTION_SPEED_MS)
                 v_ref_adapted = np.minimum(v_ref_adapted, OBSTACLE_CAUTION_SPEED_MS)
                 v_ref_adapted = np.maximum(v_ref_adapted, OBSTACLE_CAUTION_SPEED_MS)
             else:
                 # Ngay khi mũi xe qua vật cản: tăng tốc mượt mà từ OBSTACLE_CAUTION_SPEED_MS lên TARGET_SPEED_MS
                 return_dist = progress_ego - 2.0
-                ratio = np.clip(return_dist / 6.5, 0.0, 1.0)
+                ratio = np.clip(return_dist / OBSTACLE_RETURN_RAMP_M, 0.0, 1.0)
                 v_ramp = OBSTACLE_CAUTION_SPEED_MS + ratio * (TARGET_SPEED_MS - OBSTACLE_CAUTION_SPEED_MS)
                 v_ref_adapted = np.minimum(v_ref_adapted, v_ramp)
 

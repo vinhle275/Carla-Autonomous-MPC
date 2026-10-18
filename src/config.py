@@ -43,10 +43,10 @@ FINE_Y_COEF = 20.0           # Phạt sai số Y
 FINE_V_COEF = 20.0           # Phạt sai số vận tốc V
 FINE_THETA_COEF = 30.0       # Phạt sai số góc hướng Theta
 FINE_LATERAL_COEF = 40.0     # Phạt độ lệch ngang vừa phải (nhập làn êm, không giật)
-FINE_STEER_COEF = 25.0       # Phạt góc lái (cho phép mở góc lái linh hoạt 15-35 độ khi né vật cản)
+FINE_STEER_COEF = 35.0       # Phạt góc lái (cho phép mở góc lái linh hoạt 15-35 độ khi né vật cản)
 FINE_ACC_COEF = 1.0          # Phạt sử dụng gia tốc quá lớn
-FINE_STEER_DOT_COEF = 500.0  # Phạt tốc độ bẻ lái (đủ đầm chắc để không lắc, nhưng bẻ lái dứt khoát kịp thời)
-FINE_ACC_DOT_COEF = 20.0     # Phạt giật ga/phanh
+FINE_STEER_DOT_COEF = 800.0  # Phạt tốc độ bẻ lái (đủ đầm chắc để không lắc, nhưng bẻ lái dứt khoát kịp thời)
+FINE_ACC_DOT_COEF = 25.0     # Phạt giật ga/phanh
 
 # ==============================================================================
 # --- CẤU HÌNH SINH VẬT CẢN (OBSTACLE GENERATION) ---
@@ -80,8 +80,7 @@ OBSTACLE_LATERAL_OFFSETS = [0.0, -1.5, 1.5, -0.8, 0.8]
 #     'vehicle.mini.cooperst',              # Xe Mini Cooper đỗ dừng tĩnh
 # ]
 STATIC_OBSTACLE_BLUEPRINTS = [
-    'static.prop.box01',
-    'static.prop.box02',
+    'vehicle.mini.cooperst', 
 ]
 
 # ==============================================================================
@@ -109,9 +108,32 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 # ==============================================================================
 OBSTACLE_CAUTION_SPEED_MS = 5.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~23.4 km/h - lướt êm, thoát nhanh, không quá chậm)
 OBSTACLE_SLOWDOWN_DISTANCE_M = 15.0   # Khoảng cách bắt đầu giảm tốc êm (m)
-OBSTACLE_SLOWDOWN_LATERAL_CORRIDOR_M = 0.5  # Chỉ giảm tốc nếu vật cản nằm trong hành lang tim đường +-2m
+OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 3.0  # Hành lang khoảng cách lệch ngang tối đa so với tim đường (|d_lat| <= 4.2m) để kích hoạt né
 OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
 
+# ==============================================================================
+# --- CẤU HÌNH HÌNH HỌC ĐƯỜNG CONG NÉ VẬT CẢN (S-CURVE MANEUVER GEOMETRY) ---
+# ==============================================================================
+OBSTACLE_APPROACH_RAMP_M = 12.0        # Chiều dài đoạn chuyển làn né (m) (Tăng lên để xe mở lái chuyển làn thoai thoải, mượt mà)
+OBSTACLE_APPROACH_MARGIN_M = 2.5      # Khoảng cách trước vật cản đã dời đủ 100% làn né (m) (đảm bảo không bị chạm mép vật cản)
+OBSTACLE_HOLD_DISTANCE_M = 5.0        # Chiều dài đoạn giữ nguyên làn né (m) tính từ tâm vật cản (để thoát hẳn thân và đuôi xe)
+OBSTACLE_RETURN_RAMP_M = 12.0          # Chiều dài đoạn trả lái nhập lại tim đường cũ (m) (Tăng lên để xe nhập làn từ từ, đầm chắc)
 
+# ==============================================================================
+# --- CẤU HÌNH GÓC NHÌN & CỬA SỔ THEO DÕI XE (FOLLOW CAMERA VIEWER) ---
+# ==============================================================================
+ENABLE_CHASE_CAMERA_WINDOW = True      # True: Mở cửa sổ Pygame riêng để theo dõi xe mượt mà, không giật lag
+CAMERA_WINDOW_WIDTH = 800              # Chiều rộng cửa sổ camera theo dõi (px)
+CAMERA_WINDOW_HEIGHT = 600             # Chiều cao cửa sổ camera theo dõi (px)
+ENABLE_SPECTATOR_FOLLOW = True         # True: Cho phép góc nhìn Spectator của CARLA tự động bay theo sau xe
 
-
+# ==============================================================================
+# --- CẤU HÌNH HIỂN THỊ NÉT VẼ DEBUG (DEBUG DRAWINGS SETTINGS) ---
+# ==============================================================================
+DEBUG_DRAW_SENSOR_BEAMS = False        # False: Tắt các tia laser đỏ/tím bắn từ xe tới vật cản để đỡ rối mắt
+DEBUG_DRAW_SENSOR_FOV = False          # False: Tắt 2 tia xanh lá quạt 120 độ phía trước cho màn hình sạch sẽ
+DEBUG_DRAW_SURROUND_CIRCLE = False     # False: Tắt vòng tròn 360 độ quanh thân xe
+DEBUG_DRAW_OBSTACLE_BOX = True         # True: Giữ lại viền hộp Bounding Box nhẹ quanh vật cản để dễ nhìn vị trí
+DEBUG_DRAW_FULL_TRAJECTORY = True      # True: Vẽ đường tim đường toàn cục; False: Tắt hoàn toàn
+DEBUG_DRAW_TRAJECTORY_ARROWS = False   # False: Tắt các mũi tên đỏ dày đặc trên mặt đường để thoáng mắt
+DEBUG_DRAW_HORIZON_PATH = True         # True: Giữ lại vệt đường đỏ N bước dự đoán MPC né vật cản

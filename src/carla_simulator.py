@@ -13,7 +13,10 @@ except IndexError:
     pass
 
 import carla
-from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2, CARLA_HOST, CARLA_PORT
+from src.config import (
+    MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2, CARLA_HOST, CARLA_PORT,
+    DEBUG_DRAW_FULL_TRAJECTORY, DEBUG_DRAW_TRAJECTORY_ARROWS, DEBUG_DRAW_HORIZON_PATH, DEBUG_DRAW_OBSTACLE_BOX
+)
 
 class CarlaSimulator:
     def __init__(self, host=CARLA_HOST, port=CARLA_PORT):
@@ -76,6 +79,25 @@ class CarlaSimulator:
         rotation = carla.Rotation(pitch=pitch, yaw=yaw, roll=0.0)
         spectator.set_transform(carla.Transform(location, rotation))
 
+    def follow_vehicle(self, ego_vehicle=None, distance=7.5, height=3.5, pitch=-15.0):
+        """Cập nhật Spectator của CARLA bám theo sau xe Ego (Chase Cam) mượt mà, không tốn thêm tài nguyên render"""
+        target = ego_vehicle if ego_vehicle is not None else self.ego_vehicle
+        if not target or not target.is_alive:
+            return
+        try:
+            tf = target.get_transform()
+            yaw_rad = math.radians(tf.rotation.yaw)
+            cam_x = tf.location.x - distance * math.cos(yaw_rad)
+            cam_y = tf.location.y - distance * math.sin(yaw_rad)
+            cam_z = tf.location.z + height
+            spectator = self.world.get_spectator()
+            spectator.set_transform(carla.Transform(
+                carla.Location(x=cam_x, y=cam_y, z=cam_z),
+                carla.Rotation(pitch=pitch, yaw=tf.rotation.yaw, roll=0.0)
+            ))
+        except Exception:
+            pass
+
     def clean(self):
         print("[CARLA] Đang dọn dẹp các actor xe và vật cản...")
         for actor in self.world.get_actors().filter('*vehicle*'):
@@ -111,6 +133,8 @@ class CarlaSimulator:
 
     def draw_full_trajectory_3d(self, x_traj, y_traj, theta_traj=None, life_time=300.0):
         """Vẽ toàn bộ quỹ đạo lên không gian 3D của CARLA."""
+        if not DEBUG_DRAW_FULL_TRAJECTORY:
+            return
         debug = self.world.debug
         last_z = 0.5
         for i in range(len(x_traj)):
@@ -122,13 +146,15 @@ class CarlaSimulator:
             loc = carla.Location(x=x_c, y=y_c, z=z_c)
             debug.draw_point(loc, size=0.10, color=carla.Color(0, 255, 0), life_time=life_time)
 
-            if theta_traj is not None and i % 10 == 0:
+            if DEBUG_DRAW_TRAJECTORY_ARROWS and theta_traj is not None and i % 10 == 0:
                 th = theta_traj[i]
                 end_loc = carla.Location(x=x_c + 1.2 * np.cos(th), y=y_c + 1.2 * np.sin(th), z=z_c)
                 debug.draw_arrow(loc, end_loc, thickness=0.05, arrow_size=0.15, color=carla.Color(255, 0, 0), life_time=life_time)
 
     def draw_horizon_path(self, x_ref, y_ref, life_time=0.2):
         """Vẽ đoạn quỹ đạo N bước MPC đang nhìn thấy phía trước (đường đỏ)"""
+        if not DEBUG_DRAW_HORIZON_PATH:
+            return
         debug = self.world.debug
         for i in range(len(x_ref) - 1):
             p1 = carla.Location(x=x_ref[i], y=y_ref[i], z=0.5)
@@ -137,6 +163,8 @@ class CarlaSimulator:
 
     def draw_obstacle_box_3d(self, x, y, size=0.5, life_time=300.0):
         """Vẽ khối hộp 3D màu đỏ và nhãn đánh dấu vật cản trên CARLA 3D"""
+        if not DEBUG_DRAW_OBSTACLE_BOX:
+            return
         debug = self.world.debug
         wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
         z = wp.transform.location.z + size / 2.0 if wp else 0.5

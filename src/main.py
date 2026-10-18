@@ -8,19 +8,26 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.carla_simulator import CarlaSimulator
-from src.config import N, dt, USE_LINEARIZED_QP_MPC, ENABLE_OBSTACLES
+from src.config import (
+    N, dt, USE_LINEARIZED_QP_MPC, ENABLE_OBSTACLES,
+    ENABLE_CHASE_CAMERA_WINDOW, CAMERA_WINDOW_WIDTH, CAMERA_WINDOW_HEIGHT,
+    ENABLE_SPECTATOR_FOLLOW
+)
 from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
 from src.mpc_controller import MpcController
 from src.linearized_mpc_controller import LinearizedMpcController
 from src.obstacle_detector import ObstacleDetector
 from src.create_obstacles.obstacle_generator import ObstacleManager
+from src.camera_viewer import CameraViewer
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="CARLA Autonomous MPC Path Tracking")
     parser.add_argument('--no-obstacles', action='store_true', help="Chạy chế độ thuần bám quỹ đạo (tắt sinh vật cản)")
     parser.add_argument('--with-obstacles', action='store_true', help="Bật sinh vật cản né (ghi đè config.py)")
+    parser.add_argument('--no-camera-window', action='store_true', help="Tắt cửa sổ camera theo dõi xe")
+    parser.add_argument('--camera-window', action='store_true', help="Bật cửa sổ camera theo dõi xe")
     args, unknown = parser.parse_known_args()
 
     enable_obstacles = ENABLE_OBSTACLES
@@ -46,6 +53,26 @@ def main():
 
     carla.spawn_ego_vehicle('vehicle.tesla.model3', x=x_init, y=y_init, yaw_rad=yaw_init)
     carla.set_spectator(x=x_init, y=y_init, z=35.0, pitch=-75.0, yaw=0.0)
+
+    # Khởi tạo Cửa sổ Camera theo dõi bám theo xe (Chase Camera Viewer)
+    camera_viewer = None
+    use_camera_window = ENABLE_CHASE_CAMERA_WINDOW
+    if args.no_camera_window:
+        use_camera_window = False
+    elif args.camera_window:
+        use_camera_window = True
+
+    if use_camera_window:
+        try:
+            camera_viewer = CameraViewer(
+                carla.world,
+                carla.ego_vehicle,
+                width=CAMERA_WINDOW_WIDTH,
+                height=CAMERA_WINDOW_HEIGHT
+            )
+        except Exception as e:
+            print(f"[CAMERA VIEWER] Cảnh báo: Không thể khởi tạo cửa sổ camera: {e}")
+            camera_viewer = None
 
     # 3. Sinh các vật cản tĩnh trên môi trường (nếu được kích hoạt)
     obstacle_manager = None
@@ -132,6 +159,34 @@ def main():
             logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)
 
+            # Cập nhật Spectator trong cửa sổ CARLA bay theo sau xe mượt mà
+            if ENABLE_SPECTATOR_FOLLOW:
+                carla.follow_vehicle(carla.ego_vehicle)
+
+            # Cập nhật khung hình và hiển thị thông số HUD lên cửa sổ Camera riêng
+            if camera_viewer is not None:
+                side_tag = ""
+                if hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
+                    side_tag = "TRÁI" if mpc_controller.active_obstacle['side_sign'] < 0 else "PHẢI"
+                    bypass_txt = f"NÉ {side_tag} (#{mpc_controller.active_obstacle['id']})"
+                else:
+                    bypass_txt = "BÁM ĐƯỜNG"
+
+                hud_info = {
+                    'speed_kmh': v0 * 3.6,
+                    'target_kmh': v_ref[0] * 3.6,
+                    'steer_deg': float(np.rad2deg(wheel_angle_rad)),
+                    'bypass_text': bypass_txt,
+                    'obs_count': len(detected_obstacles),
+                    'current_idx': current_idx,
+                    'total_idx': total_waypoints
+                }
+                is_viewer_alive = camera_viewer.render(hud_info)
+                if not is_viewer_alive:
+                    print("\n[CAMERA VIEWER] Người dùng đã đóng cửa sổ camera.")
+                    camera_viewer.destroy()
+                    camera_viewer = None
+
             # Đồng bộ thời gian thực bước sample dt
             calc_time = time.time() - start_time
             sleep_time = max(dt - calc_time, 0.0)
@@ -161,6 +216,8 @@ def main():
         traceback.print_exc()
     finally:
         print("\n[HOÀN THÀNH] Kết thúc mô phỏng.")
+        if camera_viewer is not None:
+            camera_viewer.destroy()
         if obstacle_manager is not None:
             obstacle_manager.destroy_all()
         carla.clean()

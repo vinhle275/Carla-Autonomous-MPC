@@ -11,14 +11,15 @@ from src.carla_simulator import CarlaSimulator
 from src.config import (
     N, dt, USE_LINEARIZED_QP_MPC, ENABLE_OBSTACLES,
     ENABLE_CHASE_CAMERA_WINDOW, CAMERA_WINDOW_WIDTH, CAMERA_WINDOW_HEIGHT,
-    ENABLE_SPECTATOR_FOLLOW
+    ENABLE_SPECTATOR_FOLLOW,
+    ENABLE_MOVING_OBSTACLES, MOVING_OBSTACLES_CSV_PATH
 )
 from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
 from src.mpc_controller import MpcController
 from src.linearized_mpc_controller import LinearizedMpcController
 from src.obstacle_detector import ObstacleDetector
-from src.create_obstacles.obstacle_generator import ObstacleManager
+from src.create_obstacles.obstacle_generator import ObstacleManager, MovingObstacleManager
 from src.camera_viewer import CameraViewer
 
 def main():
@@ -77,11 +78,26 @@ def main():
     # 3. Sinh các vật cản tĩnh trên môi trường (nếu được kích hoạt)
     obstacle_manager = None
     if enable_obstacles:
-        print("[CHẾ ĐỘ] Kích hoạt sinh vật cản né (Obstacle Avoidance Mode).")
+        print("[CHE DO] Kich hoat sinh vat can ne (Obstacle Avoidance Mode).")
         obstacle_manager = ObstacleManager(carla_sim=carla)
         obstacle_manager.generate_obstacles(x_traj, y_traj, theta_traj)
     else:
-        print("[CHẾ ĐỘ] Chạy THUẦN BÁM QUỸ ĐẠO (Pure Path Tracking - Không sinh vật cản).")
+        print("[CHE DO] Chay THUAN BAM QUY DAO (Pure Path Tracking - Khong sinh vat can tinh).")
+
+    # 3b. Spawn vat can di dong tu file CSV (neu co va ENABLE_MOVING_OBSTACLES = True)
+    moving_obstacle_manager = None
+    if ENABLE_MOVING_OBSTACLES:
+        import os
+        if os.path.exists(MOVING_OBSTACLES_CSV_PATH):
+            moving_obstacle_manager = MovingObstacleManager(carla_sim=carla, dt=dt)
+            n_mov = moving_obstacle_manager.spawn_from_csv(MOVING_OBSTACLES_CSV_PATH)
+            if n_mov > 0:
+                print(f"[MOVING OBS] Da spawn {n_mov} vat can di dong. Cap nhat vi tri moi buoc MPC.")
+            else:
+                print("[MOVING OBS] Khong co vat can di dong nao duoc spawn (file trong hoac loi).")
+                moving_obstacle_manager = None
+        else:
+            print("[MOVING OBS] Khong tim thay file moving_obstacles.csv. Bo qua.")
 
     # 4. Khởi tạo Cảm biến nhận thức ảo (Obstacle Detector) gắn trên xe Ego
     obstacle_detector = ObstacleDetector(carla.world, carla.ego_vehicle)
@@ -107,6 +123,10 @@ def main():
     try:
         while current_idx < total_waypoints - 1:
             start_time = time.time()
+
+            # Cap nhat vi tri vat can di dong (truoc khi scan cam bien)
+            if moving_obstacle_manager is not None:
+                moving_obstacle_manager.update(dt=dt)
 
             # Lấy trạng thái hiện tại của xe từ CARLA
             x0, y0, theta0_raw, v0 = carla.get_main_ego_vehicle_state()
@@ -217,11 +237,13 @@ def main():
         print(f"\n[LỖI THỰC THI] Xảy ra ngoại lệ: {e}")
         traceback.print_exc()
     finally:
-        print("\n[HOÀN THÀNH] Kết thúc mô phỏng.")
+        print("\n[HOAN THANH] Ket thuc mo phong.")
         if camera_viewer is not None:
             camera_viewer.destroy()
         if obstacle_manager is not None:
             obstacle_manager.destroy_all()
+        if moving_obstacle_manager is not None:
+            moving_obstacle_manager.destroy_all()
         carla.clean()
         logger.show_plots()
 

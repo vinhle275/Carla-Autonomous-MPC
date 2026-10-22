@@ -8,6 +8,9 @@ TRAJECTORY_CSV_PATH = os.path.abspath(
 OBSTACLES_CSV_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../data/obstacles.csv")
 )
+MOVING_OBSTACLES_CSV_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../data/moving_obstacles.csv")
+)
 OBSTACLE_SIZE = 0.5                   # Kích thước khối hộp vật cản (m)
 USE_FIXED_OBSTACLES_CSV = True        # True: Ưu tiên spawn vật cản cố định từ data/obstacles.csv nếu có
 PLOTS_DIR = os.path.abspath(
@@ -15,8 +18,8 @@ PLOTS_DIR = os.path.abspath(
 )
 
 # --- CẤU HÌNH KẾT NỐI CARLA SERVER ---
-# CARLA_HOST = '172.20.240.1'    # Đổi thành '127.0.0.1' hoặc IP máy chủ CARLA nếu chạy WSL2/máy khác (vd: '172.20.240.1')
-CARLA_HOST = '127.0.0.1' 
+CARLA_HOST = '172.20.240.1'    # Đổi thành '127.0.0.1' hoặc IP máy chủ CARLA nếu chạy WSL2/máy khác (vd: '172.20.240.1')
+# CARLA_HOST = '127.0.0.1' 
 CARLA_PORT = 2000
 
 # --- VẬN TỐC THAM CHIẾU MONG MUỐN ---
@@ -80,8 +83,22 @@ OBSTACLE_LATERAL_OFFSETS = [0.0, -1.5, 1.5, -0.8, 0.8]
 #     'vehicle.mini.cooperst',              # Xe Mini Cooper đỗ dừng tĩnh
 # ]
 STATIC_OBSTACLE_BLUEPRINTS = [
-'vehicle.toyota.prius', 
+'vehicle.toyota.prius',
 ]
+
+# ==============================================================================
+# --- CẤU HÌNH VẬT CẢN DI ĐỘNG (MOVING OBSTACLES) ---
+# ==============================================================================
+ENABLE_MOVING_OBSTACLES = True         # True: Kích hoạt vật cản di động; False: Bỏ qua
+MOVING_OBSTACLE_SPEED_MS = 3.0        # Vận tốc cố định của vật cản di động (m/s) ~ 10.8 km/h
+MOVING_OBSTACLE_LOOP = False          # True: Vật cản đi lặp vô hạn theo vòng; False: Dừng ở điểm cuối
+MOVING_OBSTACLE_BLUEPRINTS = [
+    'vehicle.toyota.prius',            # Xe sedan
+    'vehicle.audi.etron',              # Xe SUV
+    'vehicle.mini.cooperst',           # Xe nhỏ
+    'vehicle.tesla.model3',            # Xe Tesla
+]
+MOVING_OBSTACLE_MARKER_COLOR = (255, 165, 0)  # Màu vàng cam cho debug marker (R, G, B)
 
 # ==============================================================================
 # --- CẤU HÌNH CẢM BIẾN NHẬN THỨC VẬT CẢN (PERCEPTION / SENSOR) ---

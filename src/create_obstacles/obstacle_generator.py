@@ -26,7 +26,12 @@ from src.config import (
     STATIC_OBSTACLE_BLUEPRINTS,
     TRAJECTORY_CSV_PATH,
     OBSTACLES_CSV_PATH,
+    MOVING_OBSTACLES_CSV_PATH,
     USE_FIXED_OBSTACLES_CSV,
+    ENABLE_MOVING_OBSTACLES,
+    MOVING_OBSTACLE_SPEED_MS,
+    MOVING_OBSTACLE_LOOP,
+    MOVING_OBSTACLE_BLUEPRINTS,
     CARLA_HOST,
     CARLA_PORT
 )
@@ -430,3 +435,309 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# ==============================================================================
+# MOVING OBSTACLE MANAGER
+# ==============================================================================
+
+import threading
+
+class MovingObstacleManager:
+    """
+    Quan ly cac vat can di dong:
+    - Doc duong di tu file moving_obstacles.csv (tao boi generate_path.py).
+    - Spawn cac xe NPC tai diem xuat phat tuong ung.
+    - Cap nhat vi tri moi step dt theo vat can di dong bang cach:
+        * Tinh quang duong di them trong dt giay (ds = speed * dt).
+        * Noi suy vi tri tren duong path waypoint.
+        * Goi actor.set_transform() de di chuyen vat can.
+    - Chay trong Thread rieng de khong anh huong vong lap MPC.
+    - Ho tro: dung o cuoi duong (MOVING_OBSTACLE_LOOP = False)
+              hoac lap vo han (MOVING_OBSTACLE_LOOP = True).
+    """
+
+    def __init__(self, carla_sim, dt=0.1):
+        """
+        Args:
+            carla_sim: doi tuong CarlaSimulator da ket noi.
+            dt       : buoc thoi gian cap nhat vi tri (giay), dong bo voi MPC dt.
+        """
+        self.carla_sim = carla_sim
+        self.world = carla_sim.world
+        self.carla_map = carla_sim.carla_map
+        self.dt = dt
+
+        # Danh sach thong tin moi vat can di dong
+        # [{actor, path_xy, s_accumulated, current_s, speed_ms, loop, finished}, ...]
+        self._mov_actors = []
+
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    # ------------------------------------------------------------------ #
+    # Doc CSV
+    # ------------------------------------------------------------------ #
+    def load_from_csv(self, csv_path=MOVING_OBSTACLES_CSV_PATH):
+        """
+        Doc file moving_obstacles.csv va tra ve dict:
+          {obstacle_id: {'waypoints': [(x, y), ...], 'speed_ms': float}}
+        """
+        if not os.path.exists(csv_path):
+            print(f"[MOVING OBS] Khong tim thay file {csv_path}. Bo qua vat can di dong.")
+            return {}
+
+        raw = {}
+        try:
+            with open(csv_path, 'r') as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) < 5:
+                        continue
+                    try:
+                        obs_id = int(row[0].strip())
+                        x = float(row[2].strip())
+                        y = float(row[3].strip())
+                        speed = float(row[4].strip())
+                    except ValueError:
+                        continue
+                    if obs_id not in raw:
+                        raw[obs_id] = {'waypoints': [], 'speed_ms': speed}
+                    raw[obs_id]['waypoints'].append((x, y))
+        except Exception as e:
+            print(f"[MOVING OBS] Loi doc CSV: {e}")
+            return {}
+
+        print(f"[MOVING OBS] Doc duoc {len(raw)} vat can di dong tu {csv_path}.")
+        return raw
+
+    # ------------------------------------------------------------------ #
+    # Tinh quang duong tich luy tren path waypoint
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _build_path(waypoints_xy):
+        """
+        waypoints_xy: [(x1,y1), (x2,y2), ...]
+        Tra ve: (path_xy list, s_accum list)
+        """
+        s = [0.0]
+        for i in range(1, len(waypoints_xy)):
+            dx = waypoints_xy[i][0] - waypoints_xy[i - 1][0]
+            dy = waypoints_xy[i][1] - waypoints_xy[i - 1][1]
+            s.append(s[-1] + math.hypot(dx, dy))
+        return waypoints_xy, s
+
+    @staticmethod
+    def _interpolate_on_path(path_xy, s_accum, current_s):
+        """
+        Noi suy vi tri (x, y, yaw_rad) tren path tai quang duong current_s.
+        """
+        total_s = s_accum[-1]
+        # Kep gioi han
+        current_s = max(0.0, min(current_s, total_s))
+
+        # Tim doan dang o
+        idx = int(np.searchsorted(s_accum, current_s, side='right')) - 1
+        idx = max(0, min(idx, len(path_xy) - 2))
+
+        seg_s = s_accum[idx + 1] - s_accum[idx]
+        if seg_s < 1e-6:
+            t = 0.0
+        else:
+            t = (current_s - s_accum[idx]) / seg_s
+
+        x = path_xy[idx][0] + t * (path_xy[idx + 1][0] - path_xy[idx][0])
+        y = path_xy[idx][1] + t * (path_xy[idx + 1][1] - path_xy[idx][1])
+        yaw = math.atan2(
+            path_xy[idx + 1][1] - path_xy[idx][1],
+            path_xy[idx + 1][0] - path_xy[idx][0]
+        )
+        return x, y, yaw
+
+    # ------------------------------------------------------------------ #
+    # Lay do cao Z tu ban do CARLA
+    # ------------------------------------------------------------------ #
+    def _get_road_z(self, x, y, default_z=0.5):
+        wp = self.carla_map.get_waypoint(
+            carla.Location(x=x, y=y, z=0.0),
+            project_to_road=True,
+            lane_type=carla.LaneType.Any
+        )
+        return (wp.transform.location.z + 0.4) if wp else default_z
+
+    # ------------------------------------------------------------------ #
+    # Spawn tat ca vat can di dong
+    # ------------------------------------------------------------------ #
+    def spawn_from_csv(self, csv_path=MOVING_OBSTACLES_CSV_PATH):
+        """
+        Doc CSV va spawn cac vat can di dong, luu thong tin de cap nhat vi tri.
+        Tra ve so vat can da spawn.
+        """
+        if not ENABLE_MOVING_OBSTACLES:
+            print("[MOVING OBS] ENABLE_MOVING_OBSTACLES = False. Bo qua.")
+            return 0
+
+        raw = self.load_from_csv(csv_path)
+        if not raw:
+            return 0
+
+        bp_lib = self.world.get_blueprint_library()
+        bp_candidates = MOVING_OBSTACLE_BLUEPRINTS or ['vehicle.toyota.prius']
+
+        spawned = 0
+        for obs_id, info in sorted(raw.items()):
+            waypoints_xy = info['waypoints']
+            speed_ms = info['speed_ms']
+
+            if len(waypoints_xy) < 2:
+                print(f"[MOVING OBS] Vat can #{obs_id} chi co {len(waypoints_xy)} waypoint, can >= 2. Bo qua.")
+                continue
+
+            path_xy, s_accum = self._build_path(waypoints_xy)
+
+            # Chon blueprint
+            bp_name = bp_candidates[(obs_id - 1) % len(bp_candidates)]
+            matching = bp_lib.filter(bp_name)
+            bp = matching[0] if len(matching) > 0 else bp_lib.filter('vehicle.toyota.prius')[0]
+
+            # Spawn tai diem bat dau
+            x0, y0 = path_xy[0]
+            z0 = self._get_road_z(x0, y0)
+            yaw_deg = math.degrees(math.atan2(
+                path_xy[1][1] - path_xy[0][1],
+                path_xy[1][0] - path_xy[0][0]
+            ))
+
+            spawn_tf = carla.Transform(
+                carla.Location(x=x0, y=y0, z=z0),
+                carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
+            )
+            actor = self.world.try_spawn_actor(bp, spawn_tf)
+            if actor is None:
+                print(f"[MOVING OBS] Khong the spawn vat can #{obs_id} tai ({x0:.2f}, {y0:.2f}). Bo qua.")
+                continue
+
+            # Bat dau di chuyen (khong phanh, khong ga - set_transform se tu dieu khien)
+            try:
+                actor.set_autopilot(False)
+            except Exception:
+                pass
+
+            self._mov_actors.append({
+                'id': obs_id,
+                'actor': actor,
+                'path_xy': path_xy,
+                's_accum': s_accum,
+                'total_s': s_accum[-1],
+                'current_s': 0.0,
+                'speed_ms': speed_ms,
+                'loop': MOVING_OBSTACLE_LOOP,
+                'finished': False,
+            })
+
+            print(f"[MOVING OBS] Da spawn vat can #{obs_id}: {bp.id} | "
+                  f"Path {len(path_xy)} waypoints | "
+                  f"Toc do: {speed_ms:.1f} m/s | "
+                  f"Xuat phat: ({x0:.2f}, {y0:.2f})")
+            spawned += 1
+
+        if spawned > 0:
+            print(f"[MOVING OBS] Tong cong {spawned} vat can di dong da duoc spawn.")
+        return spawned
+
+    # ------------------------------------------------------------------ #
+    # Cap nhat vi tri (goi 1 lan moi buoc dt)
+    # ------------------------------------------------------------------ #
+    def update(self, dt=None):
+        """
+        Cap nhat vi tri tat ca vat can di dong. Goi moi buoc dt giay.
+        Tra ve so vat can dang con hoat dong.
+        """
+        if dt is None:
+            dt = self.dt
+        active = 0
+        for info in self._mov_actors:
+            if info['finished']:
+                continue
+            actor = info['actor']
+            if not actor.is_alive:
+                info['finished'] = True
+                continue
+
+            # Tinh quang duong di them
+            ds = info['speed_ms'] * dt
+            info['current_s'] += ds
+
+            total_s = info['total_s']
+            if info['current_s'] >= total_s:
+                if info['loop']:
+                    info['current_s'] = info['current_s'] % total_s
+                else:
+                    info['current_s'] = total_s
+                    info['finished'] = True
+
+            # Noi suy vi tri moi
+            x, y, yaw = self._interpolate_on_path(
+                info['path_xy'], info['s_accum'], info['current_s']
+            )
+            z = self._get_road_z(x, y)
+
+            try:
+                actor.set_transform(carla.Transform(
+                    carla.Location(x=x, y=y, z=z),
+                    carla.Rotation(pitch=0.0, yaw=math.degrees(yaw), roll=0.0)
+                ))
+            except Exception:
+                pass
+
+            if not info['finished']:
+                active += 1
+
+        return active
+
+    # ------------------------------------------------------------------ #
+    # Chay thread rieng (tuy chon) neu khong muon goi update() trong vong lap
+    # ------------------------------------------------------------------ #
+    def start_background_thread(self):
+        """Chay cap nhat vi tri trong thread rieng (dung khi MPC loop khong goi update())"""
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        print("[MOVING OBS] Thread cap nhat vi tri vat can di dong da khoi dong.")
+
+    def _run_loop(self):
+        while not self._stop_event.is_set():
+            t0 = time.time()
+            active = self.update(dt=self.dt)
+            if active == 0 and not any(not i['finished'] for i in self._mov_actors):
+                print("[MOVING OBS] Tat ca vat can di dong da den dich. Thread dung.")
+                break
+            elapsed = time.time() - t0
+            sleep_t = max(self.dt - elapsed, 0.0)
+            time.sleep(sleep_t)
+
+    def stop_background_thread(self):
+        """Dung thread cap nhat vi tri"""
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+    # ------------------------------------------------------------------ #
+    # Don dep
+    # ------------------------------------------------------------------ #
+    def destroy_all(self):
+        """Xoa tat ca vat can di dong khoi CARLA"""
+        self.stop_background_thread()
+        destroyed = 0
+        for info in self._mov_actors:
+            try:
+                if info['actor'].is_alive:
+                    info['actor'].destroy()
+                    destroyed += 1
+            except Exception:
+                pass
+        self._mov_actors.clear()
+        if destroyed > 0:
+            print(f"[MOVING OBS] Da don dep {destroyed} vat can di dong.")
+

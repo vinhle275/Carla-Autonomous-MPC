@@ -162,7 +162,7 @@ class CarlaSimulator:
             debug.draw_line(p1, p2, thickness=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
 
     def draw_obstacle_box_3d(self, x, y, size=0.5, life_time=300.0):
-        """Vẽ khối hộp 3D màu đỏ và nhãn đánh dấu vật cản trên CARLA 3D"""
+        """Ve khoi hop 3D mau do va nhan danh dau vat can tren CARLA 3D"""
         if not DEBUG_DRAW_OBSTACLE_BOX:
             return
         debug = self.world.debug
@@ -173,6 +173,50 @@ class CarlaSimulator:
         box = carla.BoundingBox(box_loc, extent)
         debug.draw_box(box, carla.Rotation(0, 0, 0), thickness=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
         debug.draw_string(carla.Location(x=x, y=y, z=z + size + 0.3), "OBS", color=carla.Color(255, 50, 50), life_time=life_time)
+
+    def draw_moving_obstacle_path(self, x1, y1, x2, y2, life_time=300.0):
+        """Ve doan thang duong di cua vat can di dong (mau vang cam) len CARLA 3D"""
+        import math as _math
+        debug = self.world.debug
+        wp1 = self.carla_map.get_waypoint(carla.Location(x=x1, y=y1, z=0.0),
+                                          project_to_road=True, lane_type=carla.LaneType.Any)
+        wp2 = self.carla_map.get_waypoint(carla.Location(x=x2, y=y2, z=0.0),
+                                          project_to_road=True, lane_type=carla.LaneType.Any)
+        z1 = (wp1.transform.location.z + 0.4) if wp1 else 0.5
+        z2 = (wp2.transform.location.z + 0.4) if wp2 else 0.5
+        p1 = carla.Location(x=x1, y=y1, z=z1)
+        p2 = carla.Location(x=x2, y=y2, z=z2)
+        debug.draw_line(p1, p2, thickness=0.12,
+                        color=carla.Color(255, 165, 0), life_time=life_time)
+        # Ve mui ten chi chieu di chuyen
+        mid_x = (x1 + x2) / 2.0
+        mid_y = (y1 + y2) / 2.0
+        mid_z = (z1 + z2) / 2.0
+        angle = _math.atan2(y2 - y1, x2 - x1)
+        arr_len = 0.8
+        end_x = mid_x + arr_len * _math.cos(angle)
+        end_y = mid_y + arr_len * _math.sin(angle)
+        debug.draw_arrow(
+            carla.Location(x=mid_x, y=mid_y, z=mid_z),
+            carla.Location(x=end_x, y=end_y, z=mid_z),
+            thickness=0.06, arrow_size=0.2,
+            color=carla.Color(255, 140, 0), life_time=life_time
+        )
+
+    def draw_moving_obstacle_start(self, x, y, label="MOV", life_time=300.0):
+        """Ve diem xuat phat va nhan cua vat can di dong len CARLA 3D"""
+        debug = self.world.debug
+        wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0),
+                                         project_to_road=True, lane_type=carla.LaneType.Any)
+        z = (wp.transform.location.z + 0.5) if wp else 0.5
+        loc = carla.Location(x=x, y=y, z=z)
+        debug.draw_point(loc, size=0.25, color=carla.Color(255, 165, 0), life_time=life_time)
+        debug.draw_string(
+            carla.Location(x=x, y=y, z=z + 1.5),
+            label, draw_shadow=True,
+            color=carla.Color(255, 200, 0), life_time=life_time
+        )
+
 
     def get_main_ego_vehicle_state(self):
         if not self.ego_vehicle or not self.ego_vehicle.is_alive:

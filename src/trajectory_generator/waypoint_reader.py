@@ -15,7 +15,7 @@ except IndexError:
     pass
 
 import carla
-from src.config import CARLA_HOST, CARLA_PORT, OBSTACLE_SIZE
+from src.config import CARLA_HOST, CARLA_PORT, OBSTACLE_SIZE, MOVING_OBSTACLE_SPEED_MS
 
 _cached_carla_road_data = None
 
@@ -245,5 +245,198 @@ def pick_obstacles_on_trajectory(x_traj, y_traj, theta_traj=None, host=CARLA_HOS
 
 
 def get_2d_map_and_ping_waypoints(host=CARLA_HOST, port=CARLA_PORT):
-    """Tương thích ngược với các file cũ"""
+    """Tuong thich nguoc voi cac file cu"""
     return get_path_anchors(host=host, port=port)
+
+
+class MovingObstaclePicker:
+    """
+    CUA SO 3: Hien thi quy dao PCHIP va vat can co dinh (neu co),
+    cho phep nguoi dung ve duong di va diem xuat phat cua tung vat can di dong.
+    Giao dien:
+      - Click Trai     = Them waypoint vao vat can dang ve.
+      - Phim N         = Chot vat can hien tai, bat dau vat can moi.
+      - Click Phai     = Xoa waypoint cuoi cua vat can hien tai (Undo).
+      - ENTER          = Hoan tat toan bo va dong cua so.
+    """
+
+    _COLOR_CYCLE = [
+        'orange', 'purple', 'cyan', 'magenta',
+        'brown', 'lime', 'gold', 'salmon',
+    ]
+
+    def __init__(self, carla_y_data, carla_x_data, x_traj, y_traj,
+                 static_obstacles=None):
+        self.carla_y_data = carla_y_data
+        self.carla_x_data = carla_x_data
+        self.x_traj = x_traj
+        self.y_traj = y_traj
+        self.static_obstacles = static_obstacles or []
+
+        # Danh sach vat can di dong da hoan tat
+        self.moving_obstacles = []
+        # Waypoints cua vat can dang ve (chua chot)
+        self._current_wps = []
+
+        self.fig, self.ax = plt.subplots(figsize=(13, 9))
+
+        # 1. Nen ban do duong
+        self.ax.scatter(carla_y_data, carla_x_data, s=1.5, c='lightgray',
+                        label='Road Network', zorder=1)
+
+        # 2. Quy dao xe ego (xanh la)
+        self.ax.plot(y_traj, x_traj, 'g-', linewidth=2.5,
+                     label='Quy dao xe ego (PCHIP)', zorder=2)
+        self.ax.scatter([y_traj[0]], [x_traj[0]], s=120, c='blue', marker='o',
+                        edgecolors='black', linewidth=1.5, zorder=5,
+                        label='Start ego ({:.1f}, {:.1f})'.format(x_traj[0], y_traj[0]))
+
+        # 3. Vat can co dinh (mau do, hinh vuong)
+        if self.static_obstacles:
+            ox = [o['x'] for o in self.static_obstacles]
+            oy = [o['y'] for o in self.static_obstacles]
+            self.ax.scatter(oy, ox, s=100, c='red', marker='s',
+                            edgecolors='black', linewidth=1.5, zorder=6,
+                            label='Vat can co dinh')
+
+        # 4. Layer duong waypoint vat can dang ve (mau cam nhat)
+        self._current_line, = self.ax.plot([], [], 'o--', color='darkorange',
+                                           markersize=7, linewidth=2.0,
+                                           label='Vat can dang ve (chua chot)',
+                                           zorder=7)
+
+        title = (
+            "BUOC 3: VE DUONG DI VAT CAN DI DONG\n"
+            "(Click Trai = Waypoint | N = Vat can moi | "
+            "Click Phai = Xoa WP | ENTER = Hoan tat)"
+        )
+        self.ax.set_title(title, fontsize=10, fontweight='bold', color='darkorange')
+        self.ax.set_xlabel("Truc Ngang (CARLA Y)")
+        self.ax.set_ylabel("Truc Doc (CARLA X)")
+        self.ax.axis('equal')
+        self.ax.grid(True, linestyle='--', alpha=0.6)
+        self.ax.legend(loc='upper right', fontsize=8)
+
+        self.fig.canvas.mpl_connect('button_press_event', self.on_click)
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key)
+
+    # ------------------------------------------------------------------ #
+    def _refresh_current_line(self):
+        if self._current_wps:
+            ys = [p[0] for p in self._current_wps]
+            xs = [p[1] for p in self._current_wps]
+            self._current_line.set_data(ys, xs)
+        else:
+            self._current_line.set_data([], [])
+        self.fig.canvas.draw_idle()
+
+    def _finish_current_obstacle(self):
+        """Chot vat can dang ve, luu lai va ve len lop mau khac."""
+        if len(self._current_wps) < 2:
+            print("[CANH BAO] Can it nhat 2 waypoint de chot vat can di dong!")
+            return False
+
+        idx = len(self.moving_obstacles)
+        color = self._COLOR_CYCLE[idx % len(self._COLOR_CYCLE)]
+
+        ys = [p[0] for p in self._current_wps]
+        xs = [p[1] for p in self._current_wps]
+
+        # Ve duong da chot
+        self.ax.plot(ys, xs, 'o-', color=color, markersize=7,
+                     linewidth=2.5, zorder=7,
+                     label='Vat can #{} ({:.1f} m/s)'.format(idx + 1, MOVING_OBSTACLE_SPEED_MS))
+        # Danh dau diem xuat phat
+        self.ax.scatter([ys[0]], [xs[0]], s=180, marker='*',
+                        color=color, edgecolors='black',
+                        linewidth=1.2, zorder=8)
+        self.ax.annotate(
+            'START #{}'.format(idx + 1),
+            xy=(ys[0], xs[0]),
+            fontsize=8, color=color,
+            xytext=(5, 5), textcoords='offset points'
+        )
+
+        # Luu vao danh sach
+        wps_converted = [
+            {'x': round(float(p[1]), 2), 'y': round(float(p[0]), 2)}
+            for p in self._current_wps
+        ]
+        self.moving_obstacles.append({
+            'id': idx + 1,
+            'waypoints': wps_converted,
+            'speed_ms': MOVING_OBSTACLE_SPEED_MS,
+        })
+
+        # Reset vat can hien tai
+        self._current_wps = []
+        self._current_line.set_data([], [])
+        self.ax.legend(loc='upper right', fontsize=8)
+        self.fig.canvas.draw_idle()
+
+        print("[CHOT] Vat can di dong #{} da luu ({} waypoints, v = {:.1f} m/s)".format(
+            idx + 1, len(wps_converted), MOVING_OBSTACLE_SPEED_MS))
+        return True
+
+    def on_click(self, event):
+        if event.inaxes != self.ax or self.fig.canvas.toolbar.mode != "":
+            return
+
+        click_y, click_x = event.xdata, event.ydata
+
+        if event.button == 1:      # Chuot trai -> them waypoint
+            self._current_wps.append((click_y, click_x))
+            self._refresh_current_line()
+            print("  [WP] Vat can dang ve: waypoint #{} tai (x={:.2f}, y={:.2f})".format(
+                len(self._current_wps), click_x, click_y))
+
+        elif event.button == 3:    # Chuot phai -> xoa waypoint cuoi
+            if self._current_wps:
+                removed = self._current_wps.pop()
+                self._refresh_current_line()
+                print("  [-] Da xoa waypoint tai (x={:.2f}, y={:.2f})".format(
+                    removed[1], removed[0]))
+
+    def on_key(self, event):
+        if event.key in ('n', 'N'):
+            # Chot vat can hien tai, bat dau ve vat can moi
+            self._finish_current_obstacle()
+        elif event.key == 'enter':
+            # Chot not vat can hien tai neu du waypoint, roi dong cua so
+            if len(self._current_wps) >= 2:
+                self._finish_current_obstacle()
+            elif self._current_wps:
+                print("[CANH BAO] Vat can hien tai chi co {} waypoint, can it nhat 2. Bo qua.".format(
+                    len(self._current_wps)))
+            plt.close(self.fig)
+
+    def get_moving_obstacles(self):
+        plt.show()
+        return self.moving_obstacles
+
+
+def pick_moving_obstacles_on_trajectory(x_traj, y_traj, static_obstacles=None,
+                                        host=CARLA_HOST, port=CARLA_PORT):
+    """
+    BUOC 3: Mo Cua so 3 de ve duong di cua cac vat can di dong.
+    Tra ve danh sach cac vat can di dong, moi phan tu:
+      {'id': int, 'waypoints': [{'x': float, 'y': float}, ...], 'speed_ms': float}
+    """
+    carla_y_data, carla_x_data = get_carla_road_network(host=host, port=port)
+
+    print("\n================ [BUOC 3: VE DUONG DI VAT CAN DI DONG] ================")
+    print("  - Vat can di dong se chay voi toc do co dinh = {:.1f} m/s ({:.1f} km/h).".format(
+        MOVING_OBSTACLE_SPEED_MS, MOVING_OBSTACLE_SPEED_MS * 3.6))
+    print("  - Click chuot trai: Them waypoint cho vat can dang ve.")
+    print("  - Click chuot phai: Xoa waypoint cuoi cung (Undo).")
+    print("  - Phim N: Chot vat can hien tai va bat dau ve vat can moi.")
+    print("  - Phim ENTER: Hoan tat va xuat du lieu.")
+    print("  - Nhan ENTER ngay (khong ve gi): Bo qua buoc nay (khong co vat can di dong).")
+    print("=========================================================================\n")
+
+    picker = MovingObstaclePicker(
+        carla_y_data, carla_x_data,
+        x_traj, y_traj,
+        static_obstacles=static_obstacles,
+    )
+    return picker.get_moving_obstacles()

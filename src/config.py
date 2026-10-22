@@ -30,22 +30,22 @@ MAX_WHEEL_ANGLE_RAD = 70.0 / 180.0 * np.pi
 L = 2.875  # Wheelbase length of vehicle in meters
 
 ### MPC Settings
-N = 10      # Horizon length
+N = 10      # Horizon length (10 bước ~ 1.0s khớp tối ưu với chu kỳ 10Hz, tránh nhìn quá xa gây cắt cua và dao động)
 dt = 0.1    # Sample time in seconds (10Hz)
 
 MAX_CONTROL_WHEEL_ANGLE_RAD = 70.0 / 180.0 * np.pi
 MAX_CONTROL_ACCELERATION_M_S_2 = 10.0
 MAX_CONTROL_BRAKING_M_S_2 = -4.1
 
-# Trọng số tối ưu MPC (Triệt tiêu chao đảo lắc trái phải)
+# Trọng số tối ưu MPC (Cân bằng biên độ - pha, triệt tiêu hoàn toàn dao động hình sin khi bám đường & nhập làn)
 FINE_X_COEF = 20.0           # Phạt sai số X
 FINE_Y_COEF = 20.0           # Phạt sai số Y
-FINE_V_COEF = 20.0           # Phạt sai số vận tốc V
-FINE_THETA_COEF = 30.0       # Phạt sai số góc hướng Theta
-FINE_LATERAL_COEF = 40.0     # Phạt độ lệch ngang vừa phải (nhập làn êm, không giật)
-FINE_STEER_COEF = 35.0       # Phạt góc lái (cho phép mở góc lái linh hoạt 15-35 độ khi né vật cản)
-FINE_ACC_COEF = 1.0          # Phạt sử dụng gia tốc quá lớn
-FINE_STEER_DOT_COEF = 1000.0  # Phạt tốc độ bẻ lái (đủ đầm chắc để không lắc, nhưng bẻ lái dứt khoát kịp thời)
+FINE_V_COEF = 25.0           # Phạt sai số vận tốc V
+FINE_THETA_COEF = 35.0       # Phạt sai số góc hướng Theta (đủ lớn để giữ mũi xe ổn định khi nhập làn)
+FINE_LATERAL_COEF = 40.0     # Phạt độ lệch ngang vuông góc vừa phải (không quá gắt gây vọt lố qua lại tim đường)
+FINE_STEER_COEF = 35.0       # Phạt biên độ góc lái
+FINE_ACC_COEF = 1.0          # Phạt gia tốc
+FINE_STEER_DOT_COEF = 1000.0 # Phạt tốc độ bẻ lái nội bộ chân trời (k = 1..N-1)
 FINE_ACC_DOT_COEF = 30.0     # Phạt giật ga/phanh
 
 # ==============================================================================
@@ -80,7 +80,7 @@ OBSTACLE_LATERAL_OFFSETS = [0.0, -1.5, 1.5, -0.8, 0.8]
 #     'vehicle.mini.cooperst',              # Xe Mini Cooper đỗ dừng tĩnh
 # ]
 STATIC_OBSTACLE_BLUEPRINTS = [
-    'vehicle.mini.cooperst', 
+'vehicle.toyota.prius', 
 ]
 
 # ==============================================================================
@@ -93,7 +93,14 @@ SENSOR_TRACK_DROP_BEHIND_M = 3.0      # Khoảng cách sau lưng xe (m) để x�
 OBSTACLE_DEFAULT_SAFETY_RADIUS_M = 2.0 # Bán kính an toàn mặc định bao quanh vật cản (m)
 OBSTACLE_PROP_SAFETY_RADIUS_M = 1.4    # Bán kính an toàn cho cọc tiêu, rào chắn, thùng hàng (m)
 OBSTACLE_VEHICLE_SAFETY_RADIUS_M = 2.3 # Bán kính an toàn cho xe ô tô đỗ tĩnh (m)
-OBSTACLE_SPATIAL_CLUSTER_RANGE_M = 20.0 # Khoảng cách tối đa (m) giữa các vật cản để gom chung vào 1 cụm khi phân tích hướng né
+OBSTACLE_SPATIAL_CLUSTER_RANGE_M = 6.5  # Khoảng cách dọc tối đa (m) để gộp chung vào 1 mặt cắt ngang
+
+# Thông số hình học thân xe & lề đường mặc định
+DEFAULT_ROAD_HALF_WIDTH_M = 3.8         # Nửa bề rộng mặt đường khả dụng mặc định (m)
+MAX_LATERAL_ACCEL_M_S_2 = 3.2           # Gia tốc ngang tối đa cho phép khi vừa cua vừa né (m/s^2)
+EGO_FRONT_OVERHANG_M = 2.4              # Khoảng cách từ tâm xe Ego tới cản trước (m)
+EGO_REAR_OVERHANG_M = 2.4               # Khoảng cách từ tâm xe Ego tới cản sau (m)
+EGO_HALF_WIDTH_M = 1.0                  # Nửa chiều rộng thân xe Ego (m)
 
 # ==============================================================================
 # --- CẤU HÌNH TUYẾN TÍNH HÓA LẶP & RÀNG BUỘC MỀM (SLACK QP-MPC) ---
@@ -122,10 +129,10 @@ ROADBLOCK_DECELERATION_M_S_2 = 3.0     # Gia tốc hãm phanh êm ái khi dừng
 # ==============================================================================
 # --- CẤU HÌNH HÌNH HỌC ĐƯỜNG CONG NÉ VẬT CẢN (S-CURVE MANEUVER GEOMETRY) ---
 # ==============================================================================
-OBSTACLE_APPROACH_RAMP_M = 12.0        # Chiều dài đoạn chuyển làn né (m) (Tăng lên để xe mở lái chuyển làn thoai thoải, mượt mà)
-OBSTACLE_APPROACH_MARGIN_M = 2.5      # Khoảng cách trước vật cản đã dời đủ 100% làn né (m) (đảm bảo không bị chạm mép vật cản)
-OBSTACLE_HOLD_DISTANCE_M = 5.0        # Chiều dài đoạn giữ nguyên làn né (m) tính từ tâm vật cản (để thoát hẳn thân và đuôi xe)
-OBSTACLE_RETURN_RAMP_M = 10.0          # Chiều dài đoạn trả lái nhập lại tim đường cũ (m) (Tăng lên để xe nhập làn từ từ, đầm chắc)
+OBSTACLE_APPROACH_RAMP_M = 13.0         # Chiều dài dốc mở lái trước mũi xe - đuôi vật cản (m)
+OBSTACLE_APPROACH_MARGIN_M = 2.5       # Khoảng đệm hoàn tất 100% mở lái trước đuôi vật cản (m)
+OBSTACLE_HOLD_DISTANCE_M = 2.0         # Khoảng đệm giữ làn sau khi đuôi xe vượt qua mũi vật cản (m)
+OBSTACLE_RETURN_RAMP_M = 15.0           # Chiều dài dốc trả lái êm về tim đường (15m giúp góc nhập làn nhỏ, không vọt lố)
 
 # ==============================================================================
 # --- CẤU HÌNH GÓC NHÌN & CỬA SỔ THEO DÕI XE (FOLLOW CAMERA VIEWER) ---

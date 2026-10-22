@@ -13,7 +13,9 @@ from src.config import (
     OBSTACLE_CAUTION_SPEED_MS, OBSTACLE_SLOWDOWN_DISTANCE_M,
     OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M, OBSTACLE_PREFER_BYPASS_SIDE,
     OBSTACLE_APPROACH_RAMP_M, OBSTACLE_APPROACH_MARGIN_M,
-    OBSTACLE_HOLD_DISTANCE_M, OBSTACLE_RETURN_RAMP_M
+    OBSTACLE_HOLD_DISTANCE_M, OBSTACLE_RETURN_RAMP_M,
+    ENABLE_ROADBLOCK_EMERGENCY_STOP, ROADBLOCK_SAFE_STOP_DISTANCE_M, ROADBLOCK_DECELERATION_M_S_2,
+    OBSTACLE_SPATIAL_CLUSTER_RANGE_M
 )
 from src.help_functions import calculate_lateral_deviation, normalize_angle
 
@@ -43,6 +45,7 @@ class LinearizedMpcController:
         # Bộ theo dõi trạng thái né vật cản có nhớ (Stateful Bypass Tracker)
         # Giữ nguyên làn né khi vượt qua vật cản, không bị trả lái sớm khi vật cản rơi khỏi FOV cảm biến
         self.active_obstacle = None
+        self.active_chain = {}  # Bộ nhớ chuỗi vật cản liên tiếp (Active Chain Envelope Tracker)
 
         # Bộ đệm điều khiển dự phòng (Control buffer)
         self.control_buffer = {
@@ -52,6 +55,10 @@ class LinearizedMpcController:
         self.buffer_index = 0
         self.last_cost = 0.0
         self.is_success = False
+
+        # Trạng thái phong tỏa toàn bộ đường (Total Roadblock Emergency Stop)
+        self.is_roadblock = False
+        self.roadblock_barrier_dist = None
 
         # Quỹ đạo tim đường toàn cục để tra cứu chính xác vị trí tim đường tại các khúc cua
         self.x_traj = None
@@ -190,13 +197,14 @@ class LinearizedMpcController:
           nhưng phần lớn khối tích/đuôi xe hoặc các vật cản kế tiếp trong cụm lại nằm dạt sang bên còn lại.
         - Trả về: (side_sign, A_shift, span_left, span_right)
         """
-        # 1. Thu thập tất cả các điểm biểu diễn của primary_obs và các vật cản lân cận trong cụm (cách dưới 8.5m)
+        # 1. Thu thập tất cả các điểm biểu diễn của primary_obs và các vật cản lân cận trong cụm (cách dưới OBSTACLE_SPATIAL_CLUSTER_RANGE_M dọc theo đường)
         all_pts = self.extract_obstacle_points(primary_obs)
         if candidate_obstacles:
-            p_dist = primary_obs.get('dist', 10.0)
+            p_long = primary_obs.get('d_long_ego', primary_obs.get('dist', 10.0))
             for c_obs in candidate_obstacles:
                 if c_obs.get('id') != primary_obs.get('id'):
-                    if abs(c_obs.get('dist', p_dist) - p_dist) <= 8.5:
+                    c_long = c_obs.get('d_long_ego', c_obs.get('dist', p_long))
+                    if abs(c_long - p_long) <= OBSTACLE_SPATIAL_CLUSTER_RANGE_M:
                         all_pts.extend(self.extract_obstacle_points(c_obs))
 
         # 2. Chiếu tất cả các điểm lên tim đường để xác định độ chiếm dụng không gian hai bên làn
@@ -240,24 +248,49 @@ class LinearizedMpcController:
         # Đảm bảo thân xe (nửa rộng ~1.0m + lề an toàn) cách mép ngoài cùng của vật cản một khoảng an toàn
         if side_sign < 0:
             # Né TRÁI: mép vật cản gần làn né nhất là span_left
-            A_shift = max(1.95, span_left + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
+            A_shift = max(1.5, span_left + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
         else:
             # Né PHẢI: mép vật cản gần làn né nhất là span_right
-            A_shift = max(1.95, span_right + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
-
+            A_shift = max(1.5, span_right + 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M)
+            
         # Giới hạn A_shift tối đa để vừa đủ thoát cụm vật cản mà không lao ra ngoài lề đường (tối đa 3.60m)
-        A_shift = min(A_shift, 3.6)
+        # A_shift = min(A_shift, 5.0)
 
         return side_sign, A_shift, span_left, span_right
 
+    def calc_obstacle_weight(self, progress):
+        """
+        Hàm tính trọng số chuyển làn Cosine mượt mà theo tiến độ dọc:
+        - Trước vật cản: Mở góc lái chuyển làn thoai thoải từ 0 -> 1.0
+        - Chạy ngang qua vật cản: Giữ vững 100% làn né (1.0)
+        - Vượt qua xong: Đánh lái từ từ trả lại tim đường từ 1.0 -> 0.0
+        """
+        app_start = OBSTACLE_APPROACH_RAMP_M + OBSTACLE_APPROACH_MARGIN_M
+        ret_end = OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M
+
+        if progress < -OBSTACLE_APPROACH_MARGIN_M:
+            dist_before = -progress
+            if dist_before <= app_start:
+                return 0.5 * (1.0 + math.cos(math.pi * (dist_before - OBSTACLE_APPROACH_MARGIN_M) / OBSTACLE_APPROACH_RAMP_M))
+            else:
+                return 0.0
+        elif -OBSTACLE_APPROACH_MARGIN_M <= progress <= OBSTACLE_HOLD_DISTANCE_M:
+            return 1.0
+        elif OBSTACLE_HOLD_DISTANCE_M < progress <= ret_end:
+            dist_after = progress - OBSTACLE_HOLD_DISTANCE_M
+            return 0.5 * (1.0 + math.cos(math.pi * dist_after / OBSTACLE_RETURN_RAMP_M))
+        else:
+            return 0.0
+
     def compute_local_reference_shift(self, x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles):
         """
-        Kỹ thuật Local Reference Shifting có nhớ (Stateful Local Reference Shifting):
-        - Khi phát hiện vật cản: Khóa mục tiêu (Latched Bypass), tự động uốn đường cong Cosine sang một bên.
-        - Giữ nguyên làn né (Hold lane) xuyên suốt khi xe đang chạy ngang qua vật cản,
-          kể cả khi vật cản rơi khỏi trường nhìn phía trước (FOV) của cảm biến.
-        - Chỉ khi đuôi xe đã vượt qua vật cản an toàn (> 3.5m) mới bắt đầu đánh lái từ từ sang phía ngược lại
-          để nhập trở lại tim đường cũ.
+        Kỹ thuật Local Reference Shifting dạng Đường Bao Chuỗi Vật Cản (Active Chain Envelope Reference Shifting):
+        - Giải quyết triệt để hiện tượng đánh lái loạng choạng khi gặp chuỗi nhiều vật cản liên tiếp.
+        - Thay vì chỉ né từng vật cản đơn lẻ rồi cố trả lái giữa các vật cản gần nhau (< 25m),
+          hệ thống duy trì một Active Chain Envelope bao phủ toàn bộ chuỗi vật cản:
+          + Giữ vững 100% làn né (Hold lane) xuyên suốt từ vật cản đầu tiên đến hết vật cản cuối cùng.
+          + Không bao giờ đánh lái quay về tim đường giữa 2 vật cản nếu cự ly giữa chúng không đủ an toàn.
+          + Chỉ khi đuôi xe đã vượt qua vật cản CUỐI CÙNG trong chuỗi mới bắt đầu trả lái nhập làn từ từ.
         """
         tx0 = math.cos(theta_ref[0])
         ty0 = math.sin(theta_ref[0])
@@ -265,125 +298,146 @@ class LinearizedMpcController:
         ny0 = tx0
         x_ego, y_ego = x_init[0], x_init[1]
 
-        # 1. Thu thập và phân loại vật cản nguy hiểm từ cảm biến (hành lang mở rộng 4.2m, tầm xa 26.0m)
+        # 1. Thu thập toàn bộ vật cản phía trước trên mặt đường
         crit_obs = []
+        all_road_obs = []
         if detected_obstacles and len(detected_obstacles) > 0:
             for obs in detected_obstacles:
                 d_long_ego = tx0 * (obs['x'] - x_ego) + ty0 * (obs['y'] - y_ego)
                 d_lat_road, _, _, _ = self.calculate_lateral_to_road(obs['x'], obs['y'], x_ref, y_ref, theta_ref)
-                if 0.0 <= d_long_ego <= 26.0 and abs(d_lat_road) <= OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M:
+                # Giữ vật cản từ -10.0m sau lưng đến 28.0m phía trước để duy trì đuôi trả làn an toàn
+                if -10.0 <= d_long_ego <= 28.0 and abs(d_lat_road) <= 5.5:
                     obs_c = dict(obs)
                     obs_c['d_long_ego'] = d_long_ego
                     obs_c['d_lat_road'] = d_lat_road
-                    crit_obs.append(obs_c)
+                    all_road_obs.append(obs_c)
+                    if abs(d_lat_road) <= OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M:
+                        crit_obs.append(obs_c)
 
-        # 2. Quản lý trạng thái vật cản đang né hiện tại (nếu có)
-        if self.active_obstacle is not None:
-            x_o = self.active_obstacle['x']
-            y_o = self.active_obstacle['y']
-            # Tiến độ dọc của xe so với vật cản
-            if self.x_traj is not None and len(self.x_traj) > 0:
-                _, _, _, idx_ego = self.calculate_lateral_to_road(x_ego, y_ego)
-                _, _, _, idx_o = self.calculate_lateral_to_road(x_o, y_o)
-                progress_ego = (idx_ego - idx_o) * 0.1
-            else:
-                progress_ego = tx0 * (x_ego - x_o) + ty0 * (y_ego - y_o)
+        # Kiểm tra phong tỏa toàn diện mặt đường (Roadblock Detection):
+        # Nếu có vật cản chắn làn xe ta VÀ cả làn bên trái lẫn làn bên phải đều bị chặn:
+        self.is_roadblock = False
+        self.roadblock_barrier_dist = None
 
-            # Cơ chế cập nhật từ xa có kiểm soát (Early Foresight & Latched Direction):
-            # - Khi xe còn ở xa (progress_ego < -12.0m): Cho phép cập nhật lại side_sign nếu cảm biến thấy thêm vật cản mới
-            # - Khi xe đã vào cự ly tiếp cận (-12.0m <= progress_ego < -2.0m): KHÓA CỨNG side_sign để triệt tiêu hiện tượng giật vô lăng;
-            #   chỉ mở rộng biên độ né A_shift nếu phát hiện vật cản phình rộng
-            if progress_ego < -12.0 and crit_obs:
-                primary = min(crit_obs, key=lambda o: o['dist'])
-                side_sign, A_shift, _, _ = self.analyze_spatial_occupancy(primary, crit_obs, x_ref, y_ref, theta_ref)
-                self.active_obstacle['side_sign'] = side_sign
-                self.active_obstacle['A_shift'] = max(A_shift, self.active_obstacle['A_shift'])
-                self.active_obstacle['x'] = primary['x']
-                self.active_obstacle['y'] = primary['y']
-            elif progress_ego < -2.0 and crit_obs:
-                primary = min(crit_obs, key=lambda o: o['dist'])
-                _, A_shift, _, _ = self.analyze_spatial_occupancy(primary, crit_obs, x_ref, y_ref, theta_ref)
-                self.active_obstacle['A_shift'] = max(A_shift, self.active_obstacle['A_shift'])
-
-            # Chaining cho cụm nhiều vật cản gần nhau (Obstacle Cluster Chaining):
-            # Khi xe bắt đầu vượt qua vật cản hiện tại (progress_ego >= -0.5m), chuyển giao sang vật kế tiếp trong cụm
-            # đồng thời DUY TRÌ HƯỚNG NÉ preserved_side để xe không bị đánh võng giữa cụm
-            if progress_ego >= -0.5 and crit_obs:
-                next_cluster_obs = [
-                    o for o in crit_obs
-                    if o.get('id') != self.active_obstacle.get('id') and o.get('d_long_ego', 1.0) >= 0.5
-                ]
-                if next_cluster_obs:
-                    next_obs = min(next_cluster_obs, key=lambda o: o['dist'])
-                    preserved_side = self.active_obstacle['side_sign']
-
-                    _, new_A_shift, _, _ = self.analyze_spatial_occupancy(
-                        next_obs, next_cluster_obs, x_ref, y_ref, theta_ref
-                    )
-                    new_A_shift = max(new_A_shift, self.active_obstacle['A_shift'])
-                    r_safe = next_obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
-
-                    self.active_obstacle = {
-                        'id': next_obs.get('id'),
-                        'type': next_obs.get('type'),
-                        'x': next_obs['x'],
-                        'y': next_obs['y'],
-                        'radius': next_obs['radius'],
-                        'r_safe': r_safe,
-                        'side_sign': preserved_side,
-                        'A_shift': new_A_shift
-                    }
-                    x_o = self.active_obstacle['x']
-                    y_o = self.active_obstacle['y']
-                    if self.x_traj is not None and len(self.x_traj) > 0:
-                        _, _, _, idx_o = self.calculate_lateral_to_road(x_o, y_o)
-                        progress_ego = (idx_ego - idx_o) * 0.1
-                    else:
-                        progress_ego = tx0 * (x_ego - x_o) + ty0 * (y_ego - y_o)
-
-            # Nếu xe đã vượt qua vật cản hơn tổng đoạn né và đã nhập làn xong -> Giải phóng trạng thái né
-            release_distance = OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M + 1.0
-            if progress_ego > release_distance:
-                self.active_obstacle = None
-            else:
-                if progress_ego < 0.0 and detected_obstacles:
-                    for obs in detected_obstacles:
-                        if obs.get('id') == self.active_obstacle.get('id'):
-                            self.active_obstacle['x'] = obs['x']
-                            self.active_obstacle['y'] = obs['y']
-                            break
-
-        # 3. Nếu chưa có vật cản nào đang né, kích hoạt từ danh sách crit_obs
-        if self.active_obstacle is None and crit_obs:
-            primary_obs = min(crit_obs, key=lambda o: o['dist'])
-            side_sign, A_shift, span_left, span_right = self.analyze_spatial_occupancy(
-                primary_obs, crit_obs, x_ref, y_ref, theta_ref
+        if ENABLE_ROADBLOCK_EMERGENCY_STOP and crit_obs:
+            primary_barrier = min(crit_obs, key=lambda o: o['d_long_ego'])
+            p_long = primary_barrier['d_long_ego']
+            left_blocked = any(
+                o for o in all_road_obs
+                if -5.0 <= o['d_lat_road'] <= -1.2 and abs(o['d_long_ego'] - p_long) <= 6.5
             )
-            r_safe = primary_obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
-            self.active_obstacle = {
-                'id': primary_obs.get('id'),
-                'type': primary_obs.get('type'),
-                'x': primary_obs['x'],
-                'y': primary_obs['y'],
-                'radius': primary_obs['radius'],
-                'r_safe': r_safe,
-                'side_sign': side_sign,
-                'A_shift': A_shift
-            }
+            right_blocked = any(
+                o for o in all_road_obs
+                if 1.2 <= o['d_lat_road'] <= 5.0 and abs(o['d_long_ego'] - p_long) <= 6.5
+            )
+            if left_blocked and right_blocked:
+                self.is_roadblock = True
+                self.roadblock_barrier_dist = p_long
+                self.active_obstacle = None
+                if hasattr(self, 'active_chain'):
+                    self.active_chain.clear()
+                return np.copy(x_ref), np.copy(y_ref), np.copy(theta_ref), np.copy(v_ref), False
 
-        # 4. Nếu không có vật cản nào đang kích hoạt -> Trả về tham chiếu gốc
-        if self.active_obstacle is None:
+        # 2. Quản lý trạng thái Chuỗi Vật cản Đang Né (Active Chain Tracker)
+        if not hasattr(self, 'active_chain') or self.active_chain is None:
+            self.active_chain = {}
+
+        # Giải phóng các vật cản mà xe đã hoàn toàn vượt qua và hoàn thành đoạn trả làn
+        release_dist = OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M + 1.0
+        to_remove = []
+        for obs_id, obs_data in self.active_chain.items():
+            prog_ego = tx0 * (x_ego - obs_data['x']) + ty0 * (y_ego - obs_data['y'])
+            if prog_ego > release_dist:
+                to_remove.append(obs_id)
+        for obs_id in to_remove:
+            del self.active_chain[obs_id]
+
+        # Nếu đang có chuỗi né dở dang
+        if self.active_chain:
+            first_obs = next(iter(self.active_chain.values()))
+            prog_ego = tx0 * (x_ego - first_obs['x']) + ty0 * (y_ego - first_obs['y'])
+
+            # CƠ CHẾ QUAN SÁT TỪ XA CÓ KIỂM SOÁT (EARLY FORESIGHT):
+            # - Khi xe còn ở xa (prog_ego < -12.0m): Xe vẫn đang chạy thẳng trong làn, chưa bắt đầu bẻ lái né.
+            #   Cho phép cập nhật lại hướng né side_sign nếu cảm biến quét thấy thêm vật cản mới ở các làn lân cận.
+            # - Khi xe đã vào cự ly tiếp cận (-12.0m <= prog_ego): KHÓA CỨNG side_sign để triệt tiêu hiện tượng giật lắc vô lăng.
+            if prog_ego < -12.0 and crit_obs:
+                primary = min(crit_obs, key=lambda o: o['d_long_ego'])
+                side_sign_updated, A_shift_updated, _, _ = self.analyze_spatial_occupancy(
+                    primary, all_road_obs, x_ref, y_ref, theta_ref
+                )
+                fixed_side = side_sign_updated
+                for obs_item in self.active_chain.values():
+                    obs_item['side_sign'] = fixed_side
+                    obs_item['A_shift'] = max(obs_item['A_shift'], A_shift_updated)
+            else:
+                fixed_side = first_obs['side_sign']
+
+            # Cập nhật và tự động nối dài chuỗi với bất kỳ vật cản nào mới xuất hiện phía trước trong làn xe
+            for o in crit_obs:
+                if o['id'] not in self.active_chain and o['d_long_ego'] >= -2.0:
+                    _, A_shift_o, _, _ = self.analyze_spatial_occupancy(o, all_road_obs, x_ref, y_ref, theta_ref)
+                    self.active_chain[o['id']] = {
+                        'id': o['id'],
+                        'type': o.get('type', 'vehicle'),
+                        'x': o['x'],
+                        'y': o['y'],
+                        'radius': o.get('radius', 1.0),
+                        'r_safe': o.get('radius', 1.0) + OBSTACLE_AVOIDANCE_MARGIN_M,
+                        'side_sign': fixed_side,
+                        'A_shift': A_shift_o
+                    }
+
+        # Nếu chưa có chuỗi né nào, khởi tạo chuỗi mới từ danh sách crit_obs phía trước
+        elif crit_obs:
+            ahead_obs = [o for o in crit_obs if o['d_long_ego'] >= -1.0]
+            if ahead_obs:
+                primary = min(ahead_obs, key=lambda o: o['d_long_ego'])
+                side_sign, A_shift, _, _ = self.analyze_spatial_occupancy(primary, all_road_obs, x_ref, y_ref, theta_ref)
+                self.active_chain[primary['id']] = {
+                    'id': primary['id'],
+                    'type': primary.get('type', 'vehicle'),
+                    'x': primary['x'],
+                    'y': primary['y'],
+                    'radius': primary.get('radius', 1.0),
+                    'r_safe': primary.get('radius', 1.0) + OBSTACLE_AVOIDANCE_MARGIN_M,
+                    'side_sign': side_sign,
+                    'A_shift': A_shift
+                }
+                # Thêm tất cả các vật cản kế tiếp trong chuỗi (cách dưới 25m) vào cùng một chuỗi
+                for o in ahead_obs:
+                    if o['id'] != primary['id'] and o['d_long_ego'] <= 25.0:
+                        _, A_shift_o, _, _ = self.analyze_spatial_occupancy(o, all_road_obs, x_ref, y_ref, theta_ref)
+                        self.active_chain[o['id']] = {
+                            'id': o['id'],
+                            'type': o.get('type', 'vehicle'),
+                            'x': o['x'],
+                            'y': o['y'],
+                            'radius': o.get('radius', 1.0),
+                            'r_safe': o.get('radius', 1.0) + OBSTACLE_AVOIDANCE_MARGIN_M,
+                            'side_sign': side_sign,
+                            'A_shift': A_shift_o
+                        }
+
+        # Cập nhật self.active_obstacle đại diện (phục vụ bộ điều tốc v_ref và visualization)
+        if self.active_chain:
+            candidates = list(self.active_chain.values())
+            ahead = [o for o in candidates if (tx0 * (o['x'] - x_ego) + ty0 * (o['y'] - y_ego)) >= -1.0]
+            if ahead:
+                self.active_obstacle = min(ahead, key=lambda o: tx0 * (o['x'] - x_ego) + ty0 * (o['y'] - y_ego))
+            else:
+                self.active_obstacle = max(candidates, key=lambda o: tx0 * (o['x'] - x_ego) + ty0 * (o['y'] - y_ego))
+        else:
+            self.active_obstacle = None
             return np.copy(x_ref), np.copy(y_ref), np.copy(theta_ref), np.copy(v_ref), False
 
-        # 5. Tính toán quỹ đạo uốn lượn S-curve cho cả đoạn chân trời N bước
-        x_o = self.active_obstacle['x']
-        y_o = self.active_obstacle['y']
+        # 3. Tính toán đường bao tham chiếu dời cục bộ (Active Chain Envelope Reference)
         side_sign = self.active_obstacle['side_sign']
-        A_shift = self.active_obstacle['A_shift']
-
         x_ref_mod = np.copy(x_ref)
         y_ref_mod = np.copy(y_ref)
         theta_ref_mod = np.copy(theta_ref)
+
+        chain_list = list(self.active_chain.values())
 
         for k in range(len(x_ref)):
             th_k = theta_ref[k]
@@ -392,32 +446,18 @@ class LinearizedMpcController:
             nx_k = -math.sin(th_k)
             ny_k = math.cos(th_k)
 
-            # Tọa độ dọc của waypoint k so với vật cản
-            progress_k = tx_k * (x_ref[k] - x_o) + ty_k * (y_ref[k] - y_o)
+            # Tính độ dời bao ngoài (envelope) từ tất cả vật cản trong chain
+            shift_k_max = 0.0
+            for obs_item in chain_list:
+                prog_k = tx_k * (x_ref[k] - obs_item['x']) + ty_k * (y_ref[k] - obs_item['y'])
+                w = self.calc_obstacle_weight(prog_k)
+                shift_val = obs_item['A_shift'] * w
+                if shift_val > shift_k_max:
+                    shift_k_max = shift_val
 
-            app_start = OBSTACLE_APPROACH_RAMP_M + OBSTACLE_APPROACH_MARGIN_M
-            ret_end = OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M
-
-            if progress_k < -OBSTACLE_APPROACH_MARGIN_M:
-                # Giai đoạn tiếp cận: mở góc lái chuyển làn thoai thoải theo hàm cosine
-                dist_before = -progress_k
-                if dist_before <= app_start:
-                    w = 0.5 * (1.0 + math.cos(math.pi * (dist_before - OBSTACLE_APPROACH_MARGIN_M) / OBSTACLE_APPROACH_RAMP_M))
-                else:
-                    w = 0.0
-            elif -OBSTACLE_APPROACH_MARGIN_M <= progress_k <= OBSTACLE_HOLD_DISTANCE_M:
-                # Giai đoạn chạy ngang qua vật cản: GIỮ NGUYÊN HOÀN TOÀN LÀN NÉ (thoát hẳn đuôi xe)
-                w = 1.0
-            elif OBSTACLE_HOLD_DISTANCE_M < progress_k <= ret_end:
-                # Giai đoạn vượt qua xong: đánh lái từ từ trả lại tim đường (trong quãng đường OBSTACLE_RETURN_RAMP_M)
-                dist_after = progress_k - OBSTACLE_HOLD_DISTANCE_M
-                w = 0.5 * (1.0 + math.cos(math.pi * dist_after / OBSTACLE_RETURN_RAMP_M))
-            else:
-                w = 0.0
-
-            shift_lat = side_sign * A_shift * w
-            x_ref_mod[k] = x_ref[k] + shift_lat * nx_k
-            y_ref_mod[k] = y_ref[k] + shift_lat * ny_k
+            total_shift = side_sign * shift_k_max
+            x_ref_mod[k] = x_ref[k] + total_shift * nx_k
+            y_ref_mod[k] = y_ref[k] + total_shift * ny_k
 
         # Làm mịn hướng tiếp tuyến theta_ref_mod cho quỹ đạo lách né
         for k in range(len(x_ref) - 1):
@@ -431,10 +471,11 @@ class LinearizedMpcController:
 
         return x_ref_mod, y_ref_mod, theta_ref_mod, np.copy(v_ref), True
 
-    def solve_qp_iteration(self, x_init, x_ref, y_ref, theta_ref, v_ref, obstacles=None):
+    def solve_qp_iteration(self, x_init, x_ref, y_ref, theta_ref, v_ref, obstacles=None, is_roadblock=False):
         """
         Xây dựng và giải bài toán Quy hoạch Toàn phương (QP) tại một vòng lặp tuyến tính hóa:
         - Khống chế cận dưới vận tốc (Anti-Stall) triệt tiêu hoàn toàn Freezing Robot.
+        - Khi gặp Roadblock: Cho phép min_v = 0.0 để xe phanh dừng khẩn cấp an toàn.
         - Áp dụng mặt phẳng tiếp tuyến phân luồng theo khoảng cách Euclid tuyến tính hóa.
         """
         opti = ca.Opti()
@@ -456,8 +497,11 @@ class LinearizedMpcController:
 
         cost = 0
 
-        # Cận dưới vận tốc chống chết máy / dừng khựng (Anti-Stall Velocity Bound)
-        min_v = min(float(x_init[3]), 1.5)
+        # Cận dưới vận tốc: Cho phép về 0 khi phanh dừng trước Roadblock; bình thường giữ Anti-Stall
+        if is_roadblock:
+            min_v = 0.0
+        else:
+            min_v = min(float(x_init[3]), 1.5)
 
         # Tuyến tính hóa động học xe dọc theo chân trời dự đoán
         for k in range(self.horizon):
@@ -538,7 +582,9 @@ class LinearizedMpcController:
                 for m, obs in enumerate(active_obs):
                     x_o = obs['x']
                     y_o = obs['y']
-                    r_safe = obs['radius'] + OBSTACLE_AVOIDANCE_MARGIN_M
+                    # (x_o, y_o) đã là điểm bề mặt ngoài cùng của vật cản từ Detector.
+                    # Khoảng cách từ tâm xe ta tới mép vật cản cần >= (nửa bề rộng xe ta ~1.0m + khoảng đệm an toàn)
+                    r_safe = 1.0 + OBSTACLE_AVOIDANCE_MARGIN_M
 
                     for k in range(self.horizon):
                         x_bar_k = self.x_nom[0, k]
@@ -594,7 +640,48 @@ class LinearizedMpcController:
         self.y_ref_mod = y_ref_mod
 
         # =====================================================================
-        # 2. BỘ THÍCH ỨNG TỐC ĐỘ THEO TRẠNG THÁI VƯỢT VẬT CẢN (SPEED GOVERNOR)
+        # 2. XỬ LÝ PHANH DỪNG KHẨN CẤP AN TOÀN KHI GẶP ROADBLOCK (SAFE EMERGENCY STOP)
+        # =====================================================================
+        if self.is_roadblock and self.roadblock_barrier_dist is not None:
+            d_to_barrier = self.roadblock_barrier_dist
+            d_stop = max(0.0, d_to_barrier - ROADBLOCK_SAFE_STOP_DISTANCE_M)
+            curr_v = float(x_init[3])
+
+            # Nếu xe đã tới gần điểm dừng an toàn (d_stop <= 0.25m) hoặc đã dừng hẳn (curr_v < 0.25 m/s)
+            if d_stop <= 0.25 or (curr_v < 0.25 and d_to_barrier <= ROADBLOCK_SAFE_STOP_DISTANCE_M + 1.5):
+                self.is_success = True
+                self.init_nominal_trajectory(x_init, x_ref_mod, y_ref_mod, theta_ref_mod, np.zeros_like(v_ref))
+                # Phanh cứng để xe đứng yên vững vàng, bánh lái thẳng 0 độ
+                return 0.0, -3.5
+
+            # Tạo profile giảm tốc mượt mà dừng đúng điểm d_stop cách hàng rào ROADBLOCK_SAFE_STOP_DISTANCE_M
+            v_ref_adapted = np.zeros_like(v_ref)
+            for k in range(len(v_ref)):
+                d_stop_k = max(0.0, d_stop - curr_v * k * self.dt)
+                v_target_k = math.sqrt(2.0 * ROADBLOCK_DECELERATION_M_S_2 * d_stop_k)
+                v_ref_adapted[k] = min(float(v_ref[k]), v_target_k)
+
+            if self.x_nom is None:
+                self.init_nominal_trajectory(x_init, x_ref_mod, y_ref_mod, theta_ref_mod, v_ref_adapted)
+
+            try:
+                x_opt, u_opt, cost_val = self.solve_qp_iteration(
+                    x_init, x_ref_mod, y_ref_mod, theta_ref_mod, v_ref_adapted, obstacles=None, is_roadblock=True
+                )
+                self.is_success = True
+                self.last_cost = cost_val
+                steer_rad = float(u_opt[0, 0])
+                acc_m_s2 = float(u_opt[1, 0])
+
+                # Warm-start
+                self.x_nom = x_opt
+                self.u_nom = u_opt
+                return steer_rad, acc_m_s2
+            except Exception:
+                return 0.0, -ROADBLOCK_DECELERATION_M_S_2
+
+        # =====================================================================
+        # 3. BỘ THÍCH ỨNG TỐC ĐỘ THEO TRẠNG THÁI VƯỢT VẬT CẢN (SPEED GOVERNOR)
         # =====================================================================
         v_ref_adapted = np.copy(v_ref)
         if self.active_obstacle is not None:

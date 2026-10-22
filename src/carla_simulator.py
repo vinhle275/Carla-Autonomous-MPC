@@ -197,8 +197,10 @@ class CarlaSimulator:
 
         if acceleration_m_s_2 <= 0:
             throttle = 0.0
-            # Khi xe đang đi chậm (current_speed < 2.5 m/s), không phanh quá gắt làm xe bị dính bánh chết máy
-            if current_speed < 2.5:
+            # Khi xe đang đi chậm (current_speed < 2.5 m/s):
+            # Nếu chỉ rà phanh nhẹ (acc >= -1.5), giữ brake tối đa 0.15 để không khựng dính bánh
+            # Nếu phanh dừng hẳn (acc < -1.5 hoặc dừng khẩn cấp), cho phép phanh dứt khoát để xe dừng hẳn về 0
+            if current_speed < 2.5 and acceleration_m_s_2 >= -1.5:
                 brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 0.15)
             else:
                 brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)

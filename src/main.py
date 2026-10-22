@@ -166,7 +166,9 @@ def main():
             # Cập nhật khung hình và hiển thị thông số HUD lên cửa sổ Camera riêng
             if camera_viewer is not None:
                 side_tag = ""
-                if hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
+                if hasattr(mpc_controller, 'is_roadblock') and mpc_controller.is_roadblock:
+                    bypass_txt = "DỪNG AN TOÀN (ROADBLOCK)"
+                elif hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
                     side_tag = "TRÁI" if mpc_controller.active_obstacle['side_sign'] < 0 else "PHẢI"
                     bypass_txt = f"NÉ {side_tag} (#{mpc_controller.active_obstacle['id']})"
                 else:

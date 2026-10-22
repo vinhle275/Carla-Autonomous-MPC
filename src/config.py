@@ -45,8 +45,8 @@ FINE_THETA_COEF = 30.0       # Phạt sai số góc hướng Theta
 FINE_LATERAL_COEF = 40.0     # Phạt độ lệch ngang vừa phải (nhập làn êm, không giật)
 FINE_STEER_COEF = 35.0       # Phạt góc lái (cho phép mở góc lái linh hoạt 15-35 độ khi né vật cản)
 FINE_ACC_COEF = 1.0          # Phạt sử dụng gia tốc quá lớn
-FINE_STEER_DOT_COEF = 800.0  # Phạt tốc độ bẻ lái (đủ đầm chắc để không lắc, nhưng bẻ lái dứt khoát kịp thời)
-FINE_ACC_DOT_COEF = 25.0     # Phạt giật ga/phanh
+FINE_STEER_DOT_COEF = 1000.0  # Phạt tốc độ bẻ lái (đủ đầm chắc để không lắc, nhưng bẻ lái dứt khoát kịp thời)
+FINE_ACC_DOT_COEF = 30.0     # Phạt giật ga/phanh
 
 # ==============================================================================
 # --- CẤU HÌNH SINH VẬT CẢN (OBSTACLE GENERATION) ---
@@ -93,6 +93,7 @@ SENSOR_TRACK_DROP_BEHIND_M = 3.0      # Khoảng cách sau lưng xe (m) để x�
 OBSTACLE_DEFAULT_SAFETY_RADIUS_M = 2.0 # Bán kính an toàn mặc định bao quanh vật cản (m)
 OBSTACLE_PROP_SAFETY_RADIUS_M = 1.4    # Bán kính an toàn cho cọc tiêu, rào chắn, thùng hàng (m)
 OBSTACLE_VEHICLE_SAFETY_RADIUS_M = 2.3 # Bán kính an toàn cho xe ô tô đỗ tĩnh (m)
+OBSTACLE_SPATIAL_CLUSTER_RANGE_M = 20.0 # Khoảng cách tối đa (m) giữa các vật cản để gom chung vào 1 cụm khi phân tích hướng né
 
 # ==============================================================================
 # --- CẤU HÌNH TUYẾN TÍNH HÓA LẶP & RÀNG BUỘC MỀM (SLACK QP-MPC) ---
@@ -101,15 +102,22 @@ USE_LINEARIZED_QP_MPC = True          # Bật chế độ điều khiển MPC Tu
 MPC_MAX_LINEARIZATION_ITER = 2        # Số vòng lặp tuyến tính hóa tại mỗi bước (1-2 vòng lặp)
 MPC_W_SLACK = 20000.0                 # Trọng số phạt biến bù nới lỏng (Slack Variable)
 MPC_W_SLACK_LINEAR = 500.0            # Trọng số phạt bậc 1 cho biến bù (Exact Penalty)
-OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
+OBSTACLE_AVOIDANCE_MARGIN_M = 0.35 # 0.5  # Khoảng đệm an toàn dự phòng (m) (35cm cách mép ngoài vật cản)
 
 # ==============================================================================
 # --- CẤU HÌNH THÍCH ỨNG TỐC ĐỘ KHI GẶP VẬT CẢN (ADAPTIVE SPEED GOVERNOR) ---
 # ==============================================================================
 OBSTACLE_CAUTION_SPEED_MS = 5.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~23.4 km/h - lướt êm, thoát nhanh, không quá chậm)
 OBSTACLE_SLOWDOWN_DISTANCE_M = 15.0   # Khoảng cách bắt đầu giảm tốc êm (m)
-OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 3.0  # Hành lang khoảng cách lệch ngang tối đa so với tim đường (|d_lat| <= 4.2m) để kích hoạt né
+OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 2.0  # Hành lang khoảng cách lệch ngang tối đa so với tim đường (|d_lat| <= 2.0m) để kích hoạt né (bỏ qua xe làn bên cạnh)
 OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
+
+# ==============================================================================
+# --- CẤU HÌNH PHANH DỪNG KHẨN CẤP KHI PHONG TỎA ĐƯỜNG (SAFE EMERGENCY STOP) ---
+# ==============================================================================
+ENABLE_ROADBLOCK_EMERGENCY_STOP = True  # True: Tự động phanh dừng an toàn nếu cả 2 bên làn đều bị chặn, không có lối né
+ROADBLOCK_SAFE_STOP_DISTANCE_M = 3.5   # Khoảng cách dừng an toàn trước hàng rào vật cản (m)
+ROADBLOCK_DECELERATION_M_S_2 = 3.0     # Gia tốc hãm phanh êm ái khi dừng khẩn cấp (m/s^2)
 
 # ==============================================================================
 # --- CẤU HÌNH HÌNH HỌC ĐƯỜNG CONG NÉ VẬT CẢN (S-CURVE MANEUVER GEOMETRY) ---
@@ -117,21 +125,21 @@ OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản 
 OBSTACLE_APPROACH_RAMP_M = 12.0        # Chiều dài đoạn chuyển làn né (m) (Tăng lên để xe mở lái chuyển làn thoai thoải, mượt mà)
 OBSTACLE_APPROACH_MARGIN_M = 2.5      # Khoảng cách trước vật cản đã dời đủ 100% làn né (m) (đảm bảo không bị chạm mép vật cản)
 OBSTACLE_HOLD_DISTANCE_M = 5.0        # Chiều dài đoạn giữ nguyên làn né (m) tính từ tâm vật cản (để thoát hẳn thân và đuôi xe)
-OBSTACLE_RETURN_RAMP_M = 12.0          # Chiều dài đoạn trả lái nhập lại tim đường cũ (m) (Tăng lên để xe nhập làn từ từ, đầm chắc)
+OBSTACLE_RETURN_RAMP_M = 10.0          # Chiều dài đoạn trả lái nhập lại tim đường cũ (m) (Tăng lên để xe nhập làn từ từ, đầm chắc)
 
 # ==============================================================================
 # --- CẤU HÌNH GÓC NHÌN & CỬA SỔ THEO DÕI XE (FOLLOW CAMERA VIEWER) ---
 # ==============================================================================
 ENABLE_CHASE_CAMERA_WINDOW = True      # True: Mở cửa sổ Pygame riêng để theo dõi xe mượt mà, không giật lag
-CAMERA_WINDOW_WIDTH = 800              # Chiều rộng cửa sổ camera theo dõi (px)
-CAMERA_WINDOW_HEIGHT = 600             # Chiều cao cửa sổ camera theo dõi (px)
+CAMERA_WINDOW_WIDTH = 1000            # Chiều rộng cửa sổ camera theo dõi (px)
+CAMERA_WINDOW_HEIGHT = 900           # Chiều cao cửa sổ camera theo dõi (px)
 ENABLE_SPECTATOR_FOLLOW = True         # True: Cho phép góc nhìn Spectator của CARLA tự động bay theo sau xe
 
 # ==============================================================================
 # --- CẤU HÌNH HIỂN THỊ NÉT VẼ DEBUG (DEBUG DRAWINGS SETTINGS) ---
 # ==============================================================================
-DEBUG_DRAW_SENSOR_BEAMS = False        # False: Tắt các tia laser đỏ/tím bắn từ xe tới vật cản để đỡ rối mắt
-DEBUG_DRAW_SENSOR_FOV = False          # False: Tắt 2 tia xanh lá quạt 120 độ phía trước cho màn hình sạch sẽ
+DEBUG_DRAW_SENSOR_BEAMS = True        # False: Tắt các tia laser đỏ/tím bắn từ xe tới vật cản để đỡ rối mắt
+DEBUG_DRAW_SENSOR_FOV = True          # False: Tắt 2 tia xanh lá quạt 120 độ phía trước cho màn hình sạch sẽ
 DEBUG_DRAW_SURROUND_CIRCLE = False     # False: Tắt vòng tròn 360 độ quanh thân xe
 DEBUG_DRAW_OBSTACLE_BOX = True         # True: Giữ lại viền hộp Bounding Box nhẹ quanh vật cản để dễ nhìn vị trí
 DEBUG_DRAW_FULL_TRAJECTORY = True      # True: Vẽ đường tim đường toàn cục; False: Tắt hoàn toàn

@@ -113,7 +113,7 @@ OBSTACLE_VEHICLE_SAFETY_RADIUS_M = 2.3 # Bán kính an toàn cho xe ô tô đỗ
 OBSTACLE_SPATIAL_CLUSTER_RANGE_M = 6.5  # Khoảng cách dọc tối đa (m) để gộp chung vào 1 mặt cắt ngang
 
 # Thông số hình học thân xe & lề đường mặc định
-DEFAULT_ROAD_HALF_WIDTH_M = 3.8         # Nửa bề rộng mặt đường khả dụng mặc định (m)
+DEFAULT_ROAD_HALF_WIDTH_M = 5.25      # Giới hạn biên dịch tâm xe tối đa (m) (A_shift_max ~ 3.20m; nếu vật cản ép vượt quá biên này sẽ coi là chắn kín làn né)
 MAX_LATERAL_ACCEL_M_S_2 = 3.2           # Gia tốc ngang tối đa cho phép khi vừa cua vừa né (m/s^2)
 EGO_FRONT_OVERHANG_M = 2.4              # Khoảng cách từ tâm xe Ego tới cản trước (m)
 EGO_REAR_OVERHANG_M = 2.4               # Khoảng cách từ tâm xe Ego tới cản sau (m)
@@ -159,9 +159,9 @@ ROADBLOCK_DECELERATION_M_S_2 = 3.0     # Gia tốc hãm phanh êm ái khi dừng
 # --- CẤU HÌNH HÌNH HỌC ĐƯỜNG CONG NÉ VẬT CẢN (S-CURVE MANEUVER GEOMETRY) ---
 # ==============================================================================
 OBSTACLE_APPROACH_RAMP_M = 13.0         # Chiều dài dốc mở lái trước mũi xe - đuôi vật cản (m)
-OBSTACLE_APPROACH_MARGIN_M = 2.5       # Khoảng đệm hoàn tất 100% mở lái trước đuôi vật cản (m)
-OBSTACLE_HOLD_DISTANCE_M = 2.0         # Khoảng đệm giữ làn sau khi đuôi xe vượt qua mũi vật cản (m)
-OBSTACLE_RETURN_RAMP_M = 15.0           # Chiều dài dốc trả lái êm về tim đường (15m giúp góc nhập làn nhỏ, không vọt lố)
+OBSTACLE_APPROACH_MARGIN_M = 2.0       # Khoảng đệm hoàn tất 100% mở lái trước đuôi vật cản (m)
+OBSTACLE_HOLD_DISTANCE_M = 2.0        # Khoảng đệm giữ làn sau khi đuôi xe vượt qua mũi vật cản (m)
+OBSTACLE_RETURN_RAMP_M = 10.0         # Chiều dài dốc trả lái êm về tim đường (15m giúp góc nhập làn nhỏ, không vọt lố)
 
 # ==============================================================================
 # --- CẤU HÌNH GÓC NHÌN & CỬA SỔ THEO DÕI XE (FOLLOW CAMERA VIEWER) ---

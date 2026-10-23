@@ -90,7 +90,7 @@ STATIC_OBSTACLE_BLUEPRINTS = [
 # --- CẤU HÌNH VẬT CẢN DI ĐỘNG (MOVING OBSTACLES) ---
 # ==============================================================================
 ENABLE_MOVING_OBSTACLES = True         # True: Kích hoạt vật cản di động; False: Bỏ qua
-MOVING_OBSTACLE_SPEED_MS = 3.0        # Vận tốc cố định của vật cản di động (m/s) ~ 10.8 km/h
+MOVING_OBSTACLE_SPEED_MS = 9.0        # Vận tốc cố định của vật cản di động (m/s) ~ 10.8 km/h
 MOVING_OBSTACLE_LOOP = False          # True: Vật cản đi lặp vô hạn theo vòng; False: Dừng ở điểm cuối
 MOVING_OBSTACLE_BLUEPRINTS = [
     'vehicle.toyota.prius',            # Xe sedan

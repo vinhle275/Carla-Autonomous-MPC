@@ -43,8 +43,9 @@ def main():
     print("   CARLA AUTONOMOUS MPC - PATH TRACKING & OBSTACLES       ")
     print("==========================================================")
 
-    # 1. Tải quỹ đạo từ file CSV (đã áp dụng np.unwrap cho góc theta)
+    # 1. Tải quỹ đạo và danh sách vật cản từ file CSV
     x_traj, y_traj, theta_traj, v_ref_traj = load_csv_trajectory()
+    obstacles = load_csv_obstacles()
     total_waypoints = len(x_traj)
 
     # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát (đọc host từ config.py)
@@ -55,7 +56,7 @@ def main():
     yaw_init = theta_traj[0]
 
     carla.spawn_ego_vehicle('vehicle.tesla.model3', x=x_init, y=y_init, yaw_rad=yaw_init)
-    carla.set_spectator(x=x_init, y=y_init, z=35.0, pitch=-75.0, yaw=0.0)
+    carla.follow_ego_vehicle(distance=7.5, height=3.5, pitch=-15.0)
 
     # Khởi tạo Cửa sổ Camera theo dõi bám theo xe (Chase Camera Viewer)
     camera_viewer = None

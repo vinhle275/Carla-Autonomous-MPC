@@ -72,9 +72,19 @@ class PathAnchorPicker:
 
         self.path_line, = self.ax.plot([], [], 'go-', markersize=6, linewidth=2.0, label='Đường xe đi (Path Anchors)')
         self.ax.legend(loc='upper right')
+        self.update_title()
 
         self.fig.canvas.mpl_connect('button_press_event', self.on_click)
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
+
+    def update_title(self):
+        if self.mode == 'path':
+            self.ax.set_title("BƯỚC 1: CHỌN ĐƯỜNG ĐI (Click Chuột Trái = Chấm đường Xanh lá | Chuột Phải = Xóa | ENTER = Chốt đường)", 
+                              fontsize=11, fontweight='bold', color='darkgreen')
+        else:
+            self.ax.set_title("BƯỚC 2: CHỌN VẬT CẢN (Click Chuột Trái = Đặt vật cản Đỏ 0.5x0.5m | Chuột Phải = Xóa | ENTER = Hoàn tất)", 
+                              fontsize=11, fontweight='bold', color='darkred')
+        self.fig.canvas.draw_idle()
 
     def on_click(self, event):
         if event.inaxes != self.ax or self.fig.canvas.toolbar.mode != "":
@@ -100,9 +110,13 @@ class PathAnchorPicker:
 
         # Chuột phải: Xóa điểm vừa chọn
         elif event.button == 3:
-            if self.clicked_points:
-                self.clicked_points.pop()
-                self.update_plot()
+            if self.mode == 'path':
+                if self.clicked_path_points:
+                    self.clicked_path_points.pop()
+            else:
+                if self.clicked_obstacle_points:
+                    self.clicked_obstacle_points.pop()
+            self.update_plot()
 
     def on_key(self, event):
         if event.key == 'enter':
@@ -202,6 +216,7 @@ class ObstaclePicker:
         else:
             self.obstacle_scatter.set_offsets(np.empty((0, 2)))
         self.fig.canvas.draw_idle()
+        plt.pause(0.001)
 
     def get_obstacles(self):
         plt.show()

@@ -100,7 +100,7 @@ class CarlaSimulator:
             pass
 
     def clean(self):
-        print("[CARLA] Đang dọn dẹp các actor xe và vật cản...")
+        print("[CARLA] Đang dọn dẹp các actor xe và vật cản và vật cản...")
         for actor in self.world.get_actors().filter('*vehicle*'):
             try:
                 actor.destroy()

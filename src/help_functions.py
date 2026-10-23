@@ -2,11 +2,32 @@ import os
 import csv
 import numpy as np
 import math
-from src.config import N, dt, TRAJECTORY_CSV_PATH, TARGET_SPEED_MS, OVERRIDE_V_REF
+from src.config import N, dt, TRAJECTORY_CSV_PATH, OBSTACLES_CSV_PATH, TARGET_SPEED_MS, OVERRIDE_V_REF
 
 def normalize_angle(angle):
     """Chuẩn hóa góc về dải [-pi, pi]"""
     return math.atan2(math.sin(angle), math.cos(angle))
+
+def load_csv_obstacles(filepath=None):
+    """
+    Đọc file CSV chứa danh sách vật cản (x, y, size).
+    """
+    if filepath is None:
+        filepath = OBSTACLES_CSV_PATH
+
+    obstacles = []
+    if not os.path.exists(filepath):
+        return obstacles
+
+    with open(filepath, mode='r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            obstacles.append({
+                'x': float(row['x']),
+                'y': float(row['y']),
+                'size': float(row.get('size', 0.5))
+            })
+    return obstacles
 
 def load_csv_trajectory(filepath=None):
     """

@@ -17,6 +17,9 @@ PLOTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../plots")
 )
 
+# Kích thước vật cản (0.5m x 0.5m)
+OBSTACLE_SIZE = 0.5
+
 # --- CẤU HÌNH KẾT NỐI CARLA SERVER ---
 CARLA_HOST = '172.20.240.1'    # Đổi thành '127.0.0.1' hoặc IP máy chủ CARLA nếu chạy WSL2/máy khác (vd: '172.20.240.1')
 # CARLA_HOST = '127.0.0.1' 

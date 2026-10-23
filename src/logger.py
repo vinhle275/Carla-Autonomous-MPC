@@ -84,15 +84,24 @@ class Logger:
         heading_errors_deg = np.rad2deg(heading_errors_rad)
 
         # ---------------------------------------------------------
-        # 1. Biểu đồ vị trí 2D (Path tracking evaluation)
+        # 1. Biểu đồ vị trí 2D (Path tracking & Obstacle Avoidance)
         # ---------------------------------------------------------
         fig1 = plt.figure(figsize=(10, 6))
-        plt.plot(x_ref_data, y_ref_data, 'r--', label='Reference Path')
-        plt.plot(x_data, y_data, 'b-', label='Actual Vehicle Path')
+        plt.plot(x_ref_data, y_ref_data, 'g--', label='Reference Path (Đường tham chiếu)', linewidth=1.5)
+        plt.plot(x_data, y_data, 'b-', label='Actual Vehicle Path (Xe thực tế)', linewidth=2.0)
+
+        # Vẽ các vật cản nếu có
+        from src.help_functions import load_csv_obstacles
+        obstacles = load_csv_obstacles()
+        if obstacles:
+            oxs = [obs['x'] for obs in obstacles]
+            oys = [obs['y'] for obs in obstacles]
+            plt.scatter(oxs, oys, s=80, c='red', marker='s', edgecolors='black', label='Obstacles (Vật cản)', zorder=5)
+
         plt.xlabel('X (m)')
         plt.ylabel('Y (m)')
-        plt.legend()
-        plt.title('2D Path Tracking Performance (MPC vs Reference Path)')
+        plt.legend(loc='best')
+        plt.title('2D Path Tracking & Obstacle Avoidance Performance')
         plt.grid(True)
         fig1_path = os.path.join(save_dir, 'path_tracking.png')
         plt.savefig(fig1_path, dpi=300, bbox_inches='tight')
@@ -174,11 +183,13 @@ class Logger:
         fig_summary, axes = plt.subplots(3, 2, figsize=(16, 12))
 
         # (0, 0): Quỹ đạo 2D
-        axes[0, 0].plot(x_ref_data, y_ref_data, 'r--', label='Reference')
-        axes[0, 0].plot(x_data, y_data, 'b-', label='Actual')
+        axes[0, 0].plot(x_ref_data, y_ref_data, 'g--', label='Reference', linewidth=1.5)
+        axes[0, 0].plot(x_data, y_data, 'b-', label='Actual', linewidth=2.0)
+        if obstacles:
+            axes[0, 0].scatter(oxs, oys, s=60, c='red', marker='s', edgecolors='black', label='Obstacles', zorder=5)
         axes[0, 0].set_xlabel('X (m)')
         axes[0, 0].set_ylabel('Y (m)')
-        axes[0, 0].set_title('1. 2D Path Tracking')
+        axes[0, 0].set_title('1. 2D Path Tracking & Obstacles')
         axes[0, 0].legend()
         axes[0, 0].grid(True)
 

@@ -137,6 +137,18 @@ OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 2.0  # Hành lang khoảng cách lệch ng
 OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
 
 # ==============================================================================
+# --- CẤU HÌNH 2 CHẾ ĐỘ ĐIỀU KHIỂN & PHANH GẤP VÙNG NGUY HIỂM VA CHẠM ---
+# ==============================================================================
+# Chế độ 1: Bám đường né vật cản theo MPC (Normal Path Tracking & Obstacle Avoidance)
+# Chế độ 2: Phanh gấp tối đa, bỏ qua mọi ràng buộc khi có vật cản xâm nhập vùng nguy hiểm
+ENABLE_EMERGENCY_BRAKE_MODE = True        # True: Kích hoạt cơ chế 2 chế độ điều khiển
+EMERGENCY_ZONE_WIDTH_M = 2.4              # Độ rộng vùng nguy hiểm va chạm trước đầu xe (m) (đối xứng qua trục dọc xe)
+EMERGENCY_ZONE_LENGTH_M = 6.0             # Chiều dài vùng nguy hiểm tính từ cản trước xe về phía trước (m)
+EMERGENCY_CLEAR_HOLD_TIME_SEC = 2.0       # Thời gian giữ (giây) liên tục không có vật cản trước khi chuyển từ Chế độ 2 về Chế độ 1
+EMERGENCY_TRIGGER_ONLY_MOVING = False     # False: Mọi vật cản (kể cả tĩnh) lọt vào vùng nguy hiểm; True: Chỉ kích hoạt với vật cản di động
+EMERGENCY_MOVING_SPEED_THRESHOLD_MS = 0.2 # Ngưỡng vận tốc (m/s) để xác định vật cản đang di chuyển
+
+# ==============================================================================
 # --- CẤU HÌNH PHANH DỪNG KHẨN CẤP KHI PHONG TỎA ĐƯỜNG (SAFE EMERGENCY STOP) ---
 # ==============================================================================
 ENABLE_ROADBLOCK_EMERGENCY_STOP = True  # True: Tự động phanh dừng an toàn nếu cả 2 bên làn đều bị chặn, không có lối né
@@ -169,3 +181,4 @@ DEBUG_DRAW_OBSTACLE_BOX = True         # True: Giữ lại viền hộp Bounding
 DEBUG_DRAW_FULL_TRAJECTORY = True      # True: Vẽ đường tim đường toàn cục; False: Tắt hoàn toàn
 DEBUG_DRAW_TRAJECTORY_ARROWS = False   # False: Tắt các mũi tên đỏ dày đặc trên mặt đường để thoáng mắt
 DEBUG_DRAW_HORIZON_PATH = True         # True: Giữ lại vệt đường đỏ N bước dự đoán MPC né vật cản
+DEBUG_DRAW_EMERGENCY_ZONE = True       # True: Hiển thị hộp 3D vùng nguy hiểm trước đầu xe (Xanh: An toàn, Đỏ: Phanh gấp)

@@ -145,12 +145,20 @@ class CameraViewer:
         t1 = self.font.render(f"Tốc độ: {speed_kmh:4.1f} km/h (Mục tiêu: {target_kmh:4.1f})", True, speed_color)
         t2 = self.font.render(f"Góc lái: {steer_deg:+5.1f}°", True, (255, 255, 255))
 
-        bypass_color = (255, 80, 80) if "NÉ" in bypass_text else (80, 200, 255)
+        if "PHANH GẤP" in bypass_text:
+            bypass_color = (255, 40, 40)
+        elif "NÉ" in bypass_text or "DỪNG" in bypass_text:
+            bypass_color = (255, 120, 60)
+        else:
+            bypass_color = (80, 220, 255)
         t3 = self.font.render(f"Trạng thái: {bypass_text}", True, bypass_color)
 
         self.display.blit(t1, (15, 10))
         self.display.blit(t2, (340, 10))
         self.display.blit(t3, (520, 10))
+
+        if hud_info.get('is_emergency', False):
+            pygame.draw.rect(self.display, (255, 30, 30), (0, 0, self.width, 4))
 
         # Dòng 2: Hướng dẫn phím và thông tin camera
         preset_name = self.VIEW_PRESETS[self.current_preset_idx]['name']

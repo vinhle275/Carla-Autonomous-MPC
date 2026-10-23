@@ -646,6 +646,10 @@ class MovingObstacleManager:
             print(f"[MOVING OBS] Tong cong {spawned} vat can di dong da duoc spawn.")
         return spawned
 
+    def get_moving_actor_ids(self):
+        """Trả về tập hợp actor ID của các vật cản di động đang hoạt động"""
+        return {item['actor'].id for item in self._mov_actors if item.get('actor') is not None and item['actor'].is_alive}
+
     # ------------------------------------------------------------------ #
     # Cap nhat vi tri (goi 1 lan moi buoc dt)
     # ------------------------------------------------------------------ #

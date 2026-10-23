@@ -15,7 +15,8 @@ except IndexError:
 import carla
 from src.config import (
     MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2, CARLA_HOST, CARLA_PORT,
-    DEBUG_DRAW_FULL_TRAJECTORY, DEBUG_DRAW_TRAJECTORY_ARROWS, DEBUG_DRAW_HORIZON_PATH, DEBUG_DRAW_OBSTACLE_BOX
+    DEBUG_DRAW_FULL_TRAJECTORY, DEBUG_DRAW_TRAJECTORY_ARROWS, DEBUG_DRAW_HORIZON_PATH, DEBUG_DRAW_OBSTACLE_BOX,
+    DEBUG_DRAW_EMERGENCY_ZONE, EMERGENCY_ZONE_WIDTH_M, EMERGENCY_ZONE_LENGTH_M, EGO_FRONT_OVERHANG_M
 )
 
 class CarlaSimulator:
@@ -217,6 +218,42 @@ class CarlaSimulator:
             color=carla.Color(255, 200, 0), life_time=life_time
         )
 
+    def draw_emergency_danger_zone(self, x_ego, y_ego, yaw_rad, z_ego=0.5, is_triggered=False,
+                                   zone_width=EMERGENCY_ZONE_WIDTH_M,
+                                   zone_length=EMERGENCY_ZONE_LENGTH_M,
+                                   front_overhang=EGO_FRONT_OVERHANG_M,
+                                   life_time=0.2):
+        """
+        Vẽ hộp 3D hiển thị vùng nguy hiểm va chạm trước đầu xe trên môi trường CARLA:
+        - Chế độ 1 (is_triggered = False): Khung màu xanh lá thể hiện vùng giám sát an toàn.
+        - Chế độ 2 (is_triggered = True): Khung viền đỏ rực + nhãn cảnh báo PHANH GẤP!
+        """
+        if not DEBUG_DRAW_EMERGENCY_ZONE:
+            return
+        import math as _math
+        debug = self.world.debug
+
+        d_center = front_overhang + zone_length / 2.0
+        box_x = x_ego + d_center * _math.cos(yaw_rad)
+        box_y = y_ego + d_center * _math.sin(yaw_rad)
+        box_z = z_ego + 0.4
+
+        box_loc = carla.Location(x=box_x, y=box_y, z=box_z)
+        extent = carla.Vector3D(x=zone_length / 2.0, y=zone_width / 2.0, z=0.4)
+        box = carla.BoundingBox(box_loc, extent)
+        rotation = carla.Rotation(pitch=0.0, yaw=_math.degrees(yaw_rad), roll=0.0)
+
+        if is_triggered:
+            box_color = carla.Color(255, 0, 0, 220)
+            thickness = 0.08
+            debug.draw_box(box, rotation, thickness=thickness, color=box_color, life_time=life_time)
+            txt_loc = carla.Location(x=box_x, y=box_y, z=box_z + 1.2)
+            debug.draw_string(txt_loc, "[!] VÙNG NGUY HIỂM - PHANH GẤP!", draw_shadow=True,
+                              color=carla.Color(255, 50, 50), life_time=life_time)
+        else:
+            box_color = carla.Color(0, 255, 120, 70)
+            thickness = 0.03
+            debug.draw_box(box, rotation, thickness=thickness, color=box_color, life_time=life_time)
 
     def get_main_ego_vehicle_state(self):
         if not self.ego_vehicle or not self.ego_vehicle.is_alive:

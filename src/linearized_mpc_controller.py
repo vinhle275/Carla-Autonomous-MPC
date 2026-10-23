@@ -64,6 +64,17 @@ class LinearizedMpcController:
         self.is_closed_loop = False
         self.current_traj_idx = 0
 
+    def reset_nominal(self):
+        """Xóa quỹ đạo Warm-start danh định khi chuyển chế độ hoặc sau phanh khẩn cấp"""
+        self.x_nom = None
+        self.u_nom = None
+        self.u_prev = np.zeros(2)
+        self.control_buffer = {
+            "acceleration": [0.0] * self.horizon,
+            "wheel_angle": [0.0] * self.horizon
+        }
+        self.buffer_index = 0
+
     def set_global_trajectory(self, x_traj, y_traj, theta_traj):
         """Thiết lập quỹ đạo toàn cục và tính trước độ dài cung tích lũy s_traj"""
         self.x_traj = np.array(x_traj, dtype=float)

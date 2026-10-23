@@ -12,7 +12,8 @@ from src.config import (
     N, dt, USE_LINEARIZED_QP_MPC, ENABLE_OBSTACLES,
     ENABLE_CHASE_CAMERA_WINDOW, CAMERA_WINDOW_WIDTH, CAMERA_WINDOW_HEIGHT,
     ENABLE_SPECTATOR_FOLLOW,
-    ENABLE_MOVING_OBSTACLES, MOVING_OBSTACLES_CSV_PATH
+    ENABLE_MOVING_OBSTACLES, MOVING_OBSTACLES_CSV_PATH,
+    MAX_CONTROL_BRAKING_M_S_2
 )
 from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
@@ -21,6 +22,7 @@ from src.linearized_mpc_controller import LinearizedMpcController
 from src.obstacle_detector import ObstacleDetector
 from src.create_obstacles.obstacle_generator import ObstacleManager, MovingObstacleManager
 from src.camera_viewer import CameraViewer
+from src.emergency_safety import EmergencySafetyManager, VehicleMode
 
 def main():
     import argparse
@@ -117,6 +119,9 @@ def main():
 
     logger = Logger()
 
+    # 7. Khởi tạo Bộ Quản Lý An Toàn & 2 Chế Độ Điều Khiển
+    safety_manager = EmergencySafetyManager()
+
     current_idx = 0
     print("\n--- BẮT ĐẦU VÒNG LẶP ĐIỀU KHIỂN MPC BÁM ĐƯỜNG & NÉ VẬT CẢN ---")
 
@@ -146,35 +151,67 @@ def main():
             # Ghi Log đầu vào
             logger.log_controller_input(x0, y0, v0, theta0, x_ref[0], y_ref[0], v_ref[0], theta_ref[0])
 
-            # Giải bài toán tối ưu MPC (tùy theo loại bộ điều khiển)
-            t_solve_start = time.perf_counter()
-            if USE_LINEARIZED_QP_MPC:
-                x_state = np.array([x0, y0, theta0, v0])
-                wheel_angle_rad, acceleration_m_s_2 = mpc_controller.solve(
-                    x_state, x_ref, y_ref, theta_ref, v_ref,
-                    detected_obstacles=detected_obstacles
-                )
-                cost_val = mpc_controller.get_optimized_cost()
+            # Cập nhật trạng thái an toàn & kiểm tra 2 chế độ điều khiển
+            moving_ids = moving_obstacle_manager.get_moving_actor_ids() if moving_obstacle_manager is not None else None
+            current_mode, is_emergency, danger_obs, status_info = safety_manager.update(
+                x0, y0, theta0_raw, v0, detected_obstacles, dt=dt, moving_actor_ids=moving_ids
+            )
 
-                # Vẽ đường tham chiếu N bước (hiển thị đường cong né lách thời gian thực trên CARLA)
-                if hasattr(mpc_controller, 'x_ref_mod') and mpc_controller.x_ref_mod is not None:
-                    carla.draw_horizon_path(mpc_controller.x_ref_mod, mpc_controller.y_ref_mod, life_time=dt * 2)
+            # Vẽ trực quan hóa hộp 3D vùng nguy hiểm va chạm trước đầu xe trên CARLA
+            carla.draw_emergency_danger_zone(x0, y0, theta0_raw, z_ego=0.5, is_triggered=is_emergency, life_time=dt * 2)
+
+            # Phân nhánh thực thi theo 2 chế độ điều khiển:
+            t_solve_start = time.perf_counter()
+            if current_mode == VehicleMode.MODE_2_EMERGENCY_BRAKE:
+                # =============================================================
+                # --- CHẾ ĐỘ 2: PHANH GẤP TỐI ĐA, BỎ QUA MỌI RÀNG BUỘC ---
+                # =============================================================
+                wheel_angle_rad = 0.0
+                acceleration_m_s_2 = MAX_CONTROL_BRAKING_M_S_2
+                steer = 0.0
+                throttle = 0.0
+                brake = 1.0   # Phanh gấp tối đa 100% kịch sàn (mặc kệ mọi ràng buộc)
+                cost_val = 0.0
+                solve_time_sec = 0.0
+
+                # Xóa Warm-start để khi trở về Chế độ 1 xe quy hoạch lại quỹ đạo danh định từ trạng thái mới
+                if hasattr(mpc_controller, 'reset_nominal'):
+                    mpc_controller.reset_nominal()
+            else:
+                # =============================================================
+                # --- CHẾ ĐỘ 1: BÁM ĐƯỜNG NÉ VẬT CẢN (MPC CONTROLLER) ---
+                # =============================================================
+                if status_info.get('mode_changed', False):
+                    if hasattr(mpc_controller, 'reset_nominal'):
+                        mpc_controller.reset_nominal()
+
+                if USE_LINEARIZED_QP_MPC:
+                    x_state = np.array([x0, y0, theta0, v0])
+                    wheel_angle_rad, acceleration_m_s_2 = mpc_controller.solve(
+                        x_state, x_ref, y_ref, theta_ref, v_ref,
+                        detected_obstacles=detected_obstacles
+                    )
+                    cost_val = mpc_controller.get_optimized_cost()
+
+                    # Vẽ đường tham chiếu N bước (hiển thị đường cong né lách thời gian thực trên CARLA)
+                    if hasattr(mpc_controller, 'x_ref_mod') and mpc_controller.x_ref_mod is not None:
+                        carla.draw_horizon_path(mpc_controller.x_ref_mod, mpc_controller.y_ref_mod, life_time=dt * 2)
+                    else:
+                        carla.draw_horizon_path(x_ref, y_ref, life_time=dt * 2)
                 else:
                     carla.draw_horizon_path(x_ref, y_ref, life_time=dt * 2)
-            else:
-                carla.draw_horizon_path(x_ref, y_ref, life_time=dt * 2)
-                mpc_controller.reset_solver()
-                mpc_controller.set_init_vehicle_state(x0, y0, theta0, v0)
-                mpc_controller.update_cost_function(x_ref, y_ref, theta_ref, v_ref)
-                mpc_controller.solve()
-                wheel_angle_rad, acceleration_m_s_2 = mpc_controller.get_controls_value()
-                cost_val = mpc_controller.get_optimized_cost()
-            solve_time_sec = time.perf_counter() - t_solve_start
+                    mpc_controller.reset_solver()
+                    mpc_controller.set_init_vehicle_state(x0, y0, theta0, v0)
+                    mpc_controller.update_cost_function(x_ref, y_ref, theta_ref, v_ref)
+                    mpc_controller.solve()
+                    wheel_angle_rad, acceleration_m_s_2 = mpc_controller.get_controls_value()
+                    cost_val = mpc_controller.get_optimized_cost()
+                solve_time_sec = time.perf_counter() - t_solve_start
 
-            # Chuyển đổi tín hiệu điều khiển góc lái và gia tốc
-            throttle, brake, steer = CarlaSimulator.process_control_inputs(
-                wheel_angle_rad, acceleration_m_s_2, current_speed=v0
-            )
+                # Chuyển đổi tín hiệu điều khiển góc lái và gia tốc cho Chế độ 1
+                throttle, brake, steer = CarlaSimulator.process_control_inputs(
+                    wheel_angle_rad, acceleration_m_s_2, current_speed=v0
+                )
 
             logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)
@@ -185,14 +222,15 @@ def main():
 
             # Cập nhật khung hình và hiển thị thông số HUD lên cửa sổ Camera riêng
             if camera_viewer is not None:
-                side_tag = ""
-                if hasattr(mpc_controller, 'is_roadblock') and mpc_controller.is_roadblock:
+                if is_emergency:
+                    bypass_txt = status_info['status_text']
+                elif hasattr(mpc_controller, 'is_roadblock') and mpc_controller.is_roadblock:
                     bypass_txt = "DỪNG AN TOÀN (ROADBLOCK)"
                 elif hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
                     side_tag = "TRÁI" if mpc_controller.active_obstacle['side_sign'] < 0 else "PHẢI"
                     bypass_txt = f"NÉ {side_tag} (#{mpc_controller.active_obstacle['id']})"
                 else:
-                    bypass_txt = "BÁM ĐƯỜNG"
+                    bypass_txt = "CHẾ ĐỘ 1: BÁM ĐƯỜNG"
 
                 hud_info = {
                     'speed_kmh': v0 * 3.6,
@@ -201,7 +239,8 @@ def main():
                     'bypass_text': bypass_txt,
                     'obs_count': len(detected_obstacles),
                     'current_idx': current_idx,
-                    'total_idx': total_waypoints
+                    'total_idx': total_waypoints,
+                    'is_emergency': is_emergency
                 }
                 is_viewer_alive = camera_viewer.render(hud_info)
                 if not is_viewer_alive:
@@ -214,17 +253,20 @@ def main():
             sleep_time = max(dt - calc_time, 0.0)
 
             # Định dạng chuỗi trạng thái cảm biến và điều khiển né
-            bypass_info = ""
-            if hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
+            if is_emergency:
+                mode_info = f" | [!] {status_info['status_text']}"
+            elif hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
                 side_tag = "TRÁI" if mpc_controller.active_obstacle['side_sign'] < 0 else "PHẢI"
-                bypass_info = f" [NÉ {side_tag}]"
+                mode_info = f" | [CHẾ ĐỘ 1: NÉ {side_tag}]"
+            else:
+                mode_info = " | [CHẾ ĐỘ 1: BÁM ĐƯỜNG]"
 
             if detected_obstacles:
                 nearest = detected_obstacles[0]
                 src_tag = nearest.get('source', 'obs')[:3].upper()
-                obs_status = f" | [!] OBS: {len(detected_obstacles)} [{src_tag}] (D:{nearest['dist']:.1f}m, MũiXe:{nearest['d_lat']:+.1f}m){bypass_info}"
+                obs_status = f" | OBS: {len(detected_obstacles)} [{src_tag}] (D:{nearest['dist']:.1f}m, MũiXe:{nearest['d_lat']:+.1f}m){mode_info}"
             else:
-                obs_status = f" | OBS: 0{bypass_info}"
+                obs_status = f" | OBS: 0{mode_info}"
 
             print(f"Index: {current_idx}/{total_waypoints} | Pos: ({x0:.1f}, {y0:.1f}) | "
                   f"Speed: {v0:.2f}/{v_ref[0]:.2f} m/s | Steer: {steer:.2f} | Solve: {solve_time_sec:.3f}s{obs_status}", end="\r")

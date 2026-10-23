@@ -13,11 +13,7 @@ except IndexError:
     pass
 
 import carla
-from src.config import (
-    MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2, CARLA_HOST, CARLA_PORT,
-    DEBUG_DRAW_FULL_TRAJECTORY, DEBUG_DRAW_TRAJECTORY_ARROWS, DEBUG_DRAW_HORIZON_PATH, DEBUG_DRAW_OBSTACLE_BOX,
-    DEBUG_DRAW_EMERGENCY_ZONE, EMERGENCY_ZONE_WIDTH_M, EMERGENCY_ZONE_LENGTH_M, EGO_FRONT_OVERHANG_M
-)
+from src.config import MAX_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD, MAX_ACCELERATION_M_S_2, CARLA_HOST, CARLA_PORT
 
 class CarlaSimulator:
     def __init__(self, host=CARLA_HOST, port=CARLA_PORT):
@@ -80,30 +76,45 @@ class CarlaSimulator:
         rotation = carla.Rotation(pitch=pitch, yaw=yaw, roll=0.0)
         spectator.set_transform(carla.Transform(location, rotation))
 
-    def follow_vehicle(self, ego_vehicle=None, distance=7.5, height=3.5, pitch=-15.0):
-        """Cập nhật Spectator của CARLA bám theo sau xe Ego (Chase Cam) mượt mà, không tốn thêm tài nguyên render"""
-        target = ego_vehicle if ego_vehicle is not None else self.ego_vehicle
-        if not target or not target.is_alive:
+    def follow_ego_vehicle(self, distance=7.5, height=3.5, pitch=-15.0):
+        """Cập nhật Spectator camera mượt mà bám theo ngay sau đuôi xe Ego."""
+        if not self.ego_vehicle or not self.ego_vehicle.is_alive:
             return
-        try:
-            tf = target.get_transform()
-            yaw_rad = math.radians(tf.rotation.yaw)
-            cam_x = tf.location.x - distance * math.cos(yaw_rad)
-            cam_y = tf.location.y - distance * math.sin(yaw_rad)
-            cam_z = tf.location.z + height
-            spectator = self.world.get_spectator()
-            spectator.set_transform(carla.Transform(
-                carla.Location(x=cam_x, y=cam_y, z=cam_z),
-                carla.Rotation(pitch=pitch, yaw=tf.rotation.yaw, roll=0.0)
-            ))
-        except Exception:
-            pass
+        transform = self.ego_vehicle.get_transform()
+        yaw_rad = np.deg2rad(transform.rotation.yaw)
+
+        # Đặt camera phía sau và phía trên đuôi xe
+        cam_x = transform.location.x - distance * np.cos(yaw_rad)
+        cam_y = transform.location.y - distance * np.sin(yaw_rad)
+        cam_z = transform.location.z + height
+
+        spectator = self.world.get_spectator()
+        cam_location = carla.Location(x=cam_x, y=cam_y, z=cam_z)
+        cam_rotation = carla.Rotation(pitch=pitch, yaw=transform.rotation.yaw, roll=0.0)
+        spectator.set_transform(carla.Transform(cam_location, cam_rotation))
+
+    def spawn_static_obstacle(self, x, y, z=None, yaw_deg=0.0, bp_filter='static.prop.box01'):
+        """Tạo vật cản tĩnh (hộp gỗ, thùng rác, hoặc rào chắn)."""
+        bp_list = self.world.get_blueprint_library().filter(bp_filter)
+        if not bp_list:
+            bp_list = self.world.get_blueprint_library().filter('static.prop.*')
+        bp = bp_list[0]
+
+        wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
+        spawn_z = (wp.transform.location.z + 0.3) if wp else (0.5 if z is None else z)
+
+        transform = carla.Transform(
+            carla.Location(x=x, y=y, z=spawn_z),
+            carla.Rotation(pitch=0.0, yaw=yaw_deg, roll=0.0)
+        )
+        actor = self.world.try_spawn_actor(bp, transform)
+        return actor
 
     def clean(self):
-        print("[CARLA] Đang dọn dẹp các actor xe và vật cản và vật cản...")
-        for actor in self.world.get_actors().filter('*vehicle*'):
+        print("[CARLA] Đang dọn dẹp các actor xe và vật cản...")
+        for vehicle in self.world.get_actors().filter('*vehicle*'):
             try:
-                actor.destroy()
+                vehicle.destroy()
             except Exception:
                 pass
         for prop in self.world.get_actors().filter('*static.prop*'):
@@ -134,8 +145,6 @@ class CarlaSimulator:
 
     def draw_full_trajectory_3d(self, x_traj, y_traj, theta_traj=None, life_time=300.0):
         """Vẽ toàn bộ quỹ đạo lên không gian 3D của CARLA."""
-        if not DEBUG_DRAW_FULL_TRAJECTORY:
-            return
         debug = self.world.debug
         last_z = 0.5
         for i in range(len(x_traj)):
@@ -147,15 +156,13 @@ class CarlaSimulator:
             loc = carla.Location(x=x_c, y=y_c, z=z_c)
             debug.draw_point(loc, size=0.10, color=carla.Color(0, 255, 0), life_time=life_time)
 
-            if DEBUG_DRAW_TRAJECTORY_ARROWS and theta_traj is not None and i % 10 == 0:
+            if theta_traj is not None and i % 10 == 0:
                 th = theta_traj[i]
                 end_loc = carla.Location(x=x_c + 1.2 * np.cos(th), y=y_c + 1.2 * np.sin(th), z=z_c)
                 debug.draw_arrow(loc, end_loc, thickness=0.05, arrow_size=0.15, color=carla.Color(255, 0, 0), life_time=life_time)
 
     def draw_horizon_path(self, x_ref, y_ref, life_time=0.2):
         """Vẽ đoạn quỹ đạo N bước MPC đang nhìn thấy phía trước (đường đỏ)"""
-        if not DEBUG_DRAW_HORIZON_PATH:
-            return
         debug = self.world.debug
         for i in range(len(x_ref) - 1):
             p1 = carla.Location(x=x_ref[i], y=y_ref[i], z=0.5)
@@ -163,97 +170,26 @@ class CarlaSimulator:
             debug.draw_line(p1, p2, thickness=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
 
     def draw_obstacle_box_3d(self, x, y, size=0.5, life_time=300.0):
-        """Ve khoi hop 3D mau do va nhan danh dau vat can tren CARLA 3D"""
-        if not DEBUG_DRAW_OBSTACLE_BOX:
-            return
+        """Vẽ khối hộp 3D kích thước size x size m (màu đỏ) đại diện cho vật cản lên không gian CARLA."""
         debug = self.world.debug
         wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True, lane_type=carla.LaneType.Any)
-        z = wp.transform.location.z + size / 2.0 if wp else 0.5
+        z = wp.transform.location.z + size / 2.0 if wp else size / 2.0
+        
         box_loc = carla.Location(x=x, y=y, z=z)
+        # Bounding box: extent = bán kính (nửa chiều dài, nửa chiều rộng, nửa chiều cao)
         extent = carla.Vector3D(x=size / 2.0, y=size / 2.0, z=size / 2.0)
         box = carla.BoundingBox(box_loc, extent)
-        debug.draw_box(box, carla.Rotation(0, 0, 0), thickness=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
-        debug.draw_string(carla.Location(x=x, y=y, z=z + size + 0.3), "OBS", color=carla.Color(255, 50, 50), life_time=life_time)
+        debug.draw_box(box, carla.Rotation(0, 0, 0), thickness=0.08, color=carla.Color(255, 0, 0), life_time=life_time)
+        # Vẽ thêm chấm tròn đỏ nổi bật
+        debug.draw_point(carla.Location(x=x, y=y, z=z + size / 2.0 + 0.2), size=0.2, color=carla.Color(255, 0, 0), life_time=life_time)
 
-    def draw_moving_obstacle_path(self, x1, y1, x2, y2, life_time=300.0):
-        """Ve doan thang duong di cua vat can di dong (mau vang cam) len CARLA 3D"""
-        import math as _math
-        debug = self.world.debug
-        wp1 = self.carla_map.get_waypoint(carla.Location(x=x1, y=y1, z=0.0),
-                                          project_to_road=True, lane_type=carla.LaneType.Any)
-        wp2 = self.carla_map.get_waypoint(carla.Location(x=x2, y=y2, z=0.0),
-                                          project_to_road=True, lane_type=carla.LaneType.Any)
-        z1 = (wp1.transform.location.z + 0.4) if wp1 else 0.5
-        z2 = (wp2.transform.location.z + 0.4) if wp2 else 0.5
-        p1 = carla.Location(x=x1, y=y1, z=z1)
-        p2 = carla.Location(x=x2, y=y2, z=z2)
-        debug.draw_line(p1, p2, thickness=0.12,
-                        color=carla.Color(255, 165, 0), life_time=life_time)
-        # Ve mui ten chi chieu di chuyen
-        mid_x = (x1 + x2) / 2.0
-        mid_y = (y1 + y2) / 2.0
-        mid_z = (z1 + z2) / 2.0
-        angle = _math.atan2(y2 - y1, x2 - x1)
-        arr_len = 0.8
-        end_x = mid_x + arr_len * _math.cos(angle)
-        end_y = mid_y + arr_len * _math.sin(angle)
-        debug.draw_arrow(
-            carla.Location(x=mid_x, y=mid_y, z=mid_z),
-            carla.Location(x=end_x, y=end_y, z=mid_z),
-            thickness=0.06, arrow_size=0.2,
-            color=carla.Color(255, 140, 0), life_time=life_time
-        )
-
-    def draw_moving_obstacle_start(self, x, y, label="MOV", life_time=300.0):
-        """Ve diem xuat phat va nhan cua vat can di dong len CARLA 3D"""
-        debug = self.world.debug
-        wp = self.carla_map.get_waypoint(carla.Location(x=x, y=y, z=0.0),
-                                         project_to_road=True, lane_type=carla.LaneType.Any)
-        z = (wp.transform.location.z + 0.5) if wp else 0.5
-        loc = carla.Location(x=x, y=y, z=z)
-        debug.draw_point(loc, size=0.25, color=carla.Color(255, 165, 0), life_time=life_time)
-        debug.draw_string(
-            carla.Location(x=x, y=y, z=z + 1.5),
-            label, draw_shadow=True,
-            color=carla.Color(255, 200, 0), life_time=life_time
-        )
-
-    def draw_emergency_danger_zone(self, x_ego, y_ego, yaw_rad, z_ego=0.5, is_triggered=False,
-                                   zone_width=EMERGENCY_ZONE_WIDTH_M,
-                                   zone_length=EMERGENCY_ZONE_LENGTH_M,
-                                   front_overhang=EGO_FRONT_OVERHANG_M,
-                                   life_time=0.2):
-        """
-        Vẽ hộp 3D hiển thị vùng nguy hiểm va chạm trước đầu xe trên môi trường CARLA:
-        - Chế độ 1 (is_triggered = False): Khung màu xanh lá thể hiện vùng giám sát an toàn.
-        - Chế độ 2 (is_triggered = True): Khung viền đỏ rực + nhãn cảnh báo PHANH GẤP!
-        """
-        if not DEBUG_DRAW_EMERGENCY_ZONE:
-            return
-        import math as _math
-        debug = self.world.debug
-
-        d_center = front_overhang + zone_length / 2.0
-        box_x = x_ego + d_center * _math.cos(yaw_rad)
-        box_y = y_ego + d_center * _math.sin(yaw_rad)
-        box_z = z_ego + 0.4
-
-        box_loc = carla.Location(x=box_x, y=box_y, z=box_z)
-        extent = carla.Vector3D(x=zone_length / 2.0, y=zone_width / 2.0, z=0.4)
-        box = carla.BoundingBox(box_loc, extent)
-        rotation = carla.Rotation(pitch=0.0, yaw=_math.degrees(yaw_rad), roll=0.0)
-
-        if is_triggered:
-            box_color = carla.Color(255, 0, 0, 220)
-            thickness = 0.08
-            debug.draw_box(box, rotation, thickness=thickness, color=box_color, life_time=life_time)
-            txt_loc = carla.Location(x=box_x, y=box_y, z=box_z + 1.2)
-            debug.draw_string(txt_loc, "[!] VÙNG NGUY HIỂM - PHANH GẤP!", draw_shadow=True,
-                              color=carla.Color(255, 50, 50), life_time=life_time)
-        else:
-            box_color = carla.Color(0, 255, 120, 70)
-            thickness = 0.03
-            debug.draw_box(box, rotation, thickness=thickness, color=box_color, life_time=life_time)
+    def spawn_static_box_obstacle(self, x, y, size=0.5):
+        """Tạo vật cản thực tế trên CARLA (thùng hàng) hoặc vẽ khối hộp 0.5x0.5m."""
+        # Ưu tiên spawn actor hộp static.prop.box01 / streetbarrier
+        actor = self.spawn_static_obstacle(x, y, bp_filter='static.prop.box01')
+        # Vẽ viền khối hộp đỏ 0.5m x 0.5m chính xác
+        self.draw_obstacle_box_3d(x, y, size=size, life_time=300.0)
+        return actor
 
     def get_main_ego_vehicle_state(self):
         if not self.ego_vehicle or not self.ego_vehicle.is_alive:
@@ -278,13 +214,7 @@ class CarlaSimulator:
 
         if acceleration_m_s_2 <= 0:
             throttle = 0.0
-            # Khi xe đang đi chậm (current_speed < 2.5 m/s):
-            # Nếu chỉ rà phanh nhẹ (acc >= -1.5), giữ brake tối đa 0.15 để không khựng dính bánh
-            # Nếu phanh dừng hẳn (acc < -1.5 hoặc dừng khẩn cấp), cho phép phanh dứt khoát để xe dừng hẳn về 0
-            if current_speed < 2.5 and acceleration_m_s_2 >= -1.5:
-                brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 0.15)
-            else:
-                brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
+            brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
         else:
             throttle = min(acceleration_m_s_2 / MAX_ACCELERATION_M_S_2, 1.0)
             brake = 0.0

@@ -101,16 +101,28 @@ class CarlaSimulator:
 
     def clean(self):
         print("[CARLA] Đang dọn dẹp các actor xe và vật cản...")
-        for actor in self.world.get_actors().filter('*vehicle*'):
+        if self.world is None:
+            return
+
+        destroy_cmds = []
+        try:
+            actors = self.world.get_actors()
+            for actor in actors.filter('*vehicle*'):
+                if actor.is_alive:
+                    destroy_cmds.append(carla.command.DestroyActor(actor.id))
+            for prop in actors.filter('*static.prop*'):
+                if prop.is_alive:
+                    destroy_cmds.append(carla.command.DestroyActor(prop.id))
+        except Exception:
+            pass
+
+        if destroy_cmds and self.client is not None:
             try:
-                actor.destroy()
+                self.client.apply_batch_sync(destroy_cmds, False)
             except Exception:
                 pass
-        for prop in self.world.get_actors().filter('*static.prop*'):
-            try:
-                prop.destroy()
-            except Exception:
-                pass
+
+        self.ego_vehicle = None
 
     def clear_debug_drawings(self):
         """Xóa toàn bộ các nét vẽ debug (đường quỹ đạo cũ) bằng cách reload world nhẹ"""

@@ -182,3 +182,62 @@ DEBUG_DRAW_FULL_TRAJECTORY = True      # True: Vẽ đường tim đường toà
 DEBUG_DRAW_TRAJECTORY_ARROWS = False   # False: Tắt các mũi tên đỏ dày đặc trên mặt đường để thoáng mắt
 DEBUG_DRAW_HORIZON_PATH = True         # True: Giữ lại vệt đường đỏ N bước dự đoán MPC né vật cản
 DEBUG_DRAW_EMERGENCY_ZONE = True       # True: Hiển thị hộp 3D vùng nguy hiểm trước đầu xe (Xanh: An toàn, Đỏ: Phanh gấp)
+
+# ==============================================================================
+# --- CẤU HÌNH NHẬN DIỆN VẠCH VÀNG (YELLOW LINE DETECTOR) ---
+# ==============================================================================
+
+# --- Camera RGB gắn trên xe (dùng cho IPM) ---
+CAM_IMAGE_WIDTH  = 1000   # Chiều rộng ảnh camera CARLA (px) — khớp CAMERA_WINDOW_WIDTH
+CAM_IMAGE_HEIGHT = 900    # Chiều cao ảnh camera CARLA (px) — khớp CAMERA_WINDOW_HEIGHT
+CAM_FOV_DEG      = 90.0   # Field of View camera (độ) — khớp FOV trong camera_viewer.py
+
+# --- Tham số IPM (Inverse Perspective Mapping) ---
+# Điểm nguồn (src) trong không gian ROI = nửa dưới ảnh (y tính từ 0 = đầu ROI)
+# Điều chỉnh 4 điểm này khi đổi độ cao / pitch camera trong CARLA
+IPM_SRC_POINTS = [
+    [200,  350],   # Dưới-trái  (gần xe, bên trái)
+    [800,  350],   # Dưới-phải  (gần xe, bên phải)
+    [650,    0],   # Trên-phải  (xa xe, bên phải)
+    [350,    0],   # Trên-trái  (xa xe, bên trái)
+]
+# Điểm đích (dst) trong không gian BEV đầu ra
+IPM_DST_POINTS = [
+    [200, 480],    # Dưới-trái BEV
+    [600, 480],    # Dưới-phải BEV
+    [600,   0],    # Trên-phải BEV
+    [200,   0],    # Trên-trái BEV
+]
+IPM_BEV_WIDTH  = 800   # Chiều rộng ảnh BEV đầu ra (px)
+IPM_BEV_HEIGHT = 480   # Chiều cao ảnh BEV đầu ra (px)
+
+# Tỷ lệ quy đổi pixel → mét trong không gian BEV
+# (Hiệu chỉnh thực nghiệm theo camera mount; giá trị ước lượng cho Tesla Model3 CARLA)
+BEV_METERS_PER_PIXEL_X = 0.035   # ~3.5 cm/px theo chiều ngang
+BEV_METERS_PER_PIXEL_Y = 0.05    # ~5.0 cm/px theo chiều dọc (xa-gần)
+
+# --- Bộ lọc màu vàng (HSV) ---
+YELLOW_H_LOW  = 12    # Hue thấp nhất của vàng
+YELLOW_H_HIGH = 38    # Hue cao nhất của vàng
+YELLOW_S_LOW  = 40    # Saturation tối thiểu
+YELLOW_S_HIGH = 255
+YELLOW_V_LOW  = 70   # Value (độ sáng) tối thiểu
+YELLOW_V_HIGH = 255
+
+# --- Sliding Window ---
+YELLOW_NWIN          = 10    # Số cửa sổ chia chiều cao BEV (9–12)
+YELLOW_WIN_MARGIN_PX = 60    # Bán kính tìm kiếm ngang mỗi cửa sổ (px)
+YELLOW_MIN_PIX_PER_WIN = 40  # Số pixel vàng tối thiểu để cửa sổ hợp lệ
+
+# --- Ngưỡng phân loại vạch Solid / Dashed ---
+# fill_ratio = n_valid_windows / YELLOW_NWIN
+YELLOW_SOLID_FILL_RATIO  = 0.75   # fill ≥ 75% → SOLID (vạch liền)
+YELLOW_DASHED_GAP_RATIO  = 0.30   # gap ≥ 30% và có ≥2 cửa sổ trống liên tiếp → DASHED
+
+# --- Khoảng cách an toàn vạch liền (SOLID line clearance) ---
+# road_max = d_yellow_line - r_clearance  (r = EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
+YELLOW_LINE_CLEARANCE_M  = 0.35   # Khoảng đệm tối thiểu giữa thân xe và vạch liền (m)
+
+# --- Bật / Tắt module nhận diện vạch vàng ---
+ENABLE_YELLOW_LINE_DETECTOR = True   # True: Kích hoạt; False: Bỏ qua (tiết kiệm CPU nếu không cần)
+DEBUG_YELLOW_DRAW = False             # True: Vẽ overlay vạch vàng lên HUD camera (chỉ dùng khi debug)

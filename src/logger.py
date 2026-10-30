@@ -1,7 +1,68 @@
 import os
+import sys
+
+# Khắc phục triệt để xung đột Qt plugins do opencv-python (cv2) gây ra trên Linux / WSL
+for _qt_var in ["QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"]:
+    if _qt_var in os.environ:
+        del os.environ[_qt_var]
+
+# Bắt buộc sử dụng backend 'Agg' cho Matplotlib:
+# 'Agg' là bộ dựng hình C++ độc lập (raster graphics), không cần X11/Qt/Wayland,
+# hoạt động ổn định 100% trong WSL, SSH hay môi trường headless, triệt tiêu hoàn toàn
+# lỗi 'Could not load the Qt platform plugin xcb' gây Aborted (core dumped).
+import matplotlib
+matplotlib.use('Agg')
+
 import numpy as np
 from matplotlib import pyplot as plt
 from src.config import dt, PLOTS_DIR
+
+
+def open_image_in_system_viewer(file_path):
+    """
+    Tự động mở file ảnh bằng trình xem ảnh mặc định của OS (Windows / WSL2 / Linux).
+    """
+    if not os.path.exists(file_path):
+        return False
+    try:
+        # Nếu chạy trực tiếp trên Windows
+        if sys.platform.startswith("win"):
+            os.startfile(os.path.abspath(file_path))
+            return True
+
+        # Nếu chạy trên WSL2 (Windows Subsystem for Linux)
+        abs_p = os.path.abspath(file_path)
+        is_wsl = False
+        try:
+            with open("/proc/version", "r") as f:
+                if "microsoft" in f.read().lower():
+                    is_wsl = True
+        except Exception:
+            pass
+
+        if is_wsl or os.path.exists("/mnt/c/Windows"):
+            # Chuyển đổi đường dẫn /mnt/<drive>/... sang <Drive>:\...
+            if abs_p.startswith("/mnt/"):
+                parts = abs_p.split("/")
+                if len(parts) >= 3:
+                    drive = parts[2].upper()
+                    win_path = f"{drive}:\\" + "\\".join(parts[3:])
+                    ret = os.system(f'cmd.exe /c start "" "{win_path}" >/dev/null 2>&1')
+                    if ret == 0:
+                        return True
+            # Fallback dùng wslpath nếu có
+            ret = os.system(f'cmd.exe /c start "" "$(wslpath -w "{abs_p}")" >/dev/null 2>&1')
+            if ret == 0:
+                return True
+
+        # Nếu Linux Desktop thông thường có DISPLAY
+        if os.environ.get("DISPLAY"):
+            os.system(f'xdg-open "{abs_p}" >/dev/null 2>&1 &')
+            return True
+    except Exception:
+        pass
+    return False
+
 
 class Logger:
     def __init__(self):
@@ -229,6 +290,7 @@ class Logger:
         plt.tight_layout()
         summary_path = os.path.join(save_dir, 'summary_report.png')
         fig_summary.savefig(summary_path, dpi=300, bbox_inches='tight')
+        plt.close(fig_summary)
 
         print(f"\n[LOGGER] Đã tự động lưu thành công toàn bộ {6} biểu đồ vào thư mục:")
         print(f"         📁 {save_dir}")
@@ -239,4 +301,9 @@ class Logger:
         print(f"         5. {os.path.basename(fig5_path)}     (Giá trị hàm chi phí theo thời gian)")
         print(f"         6. {os.path.basename(summary_path)}   (Báo cáo tổng hợp 6-trong-1)")
 
-        plt.show()
+        # Tự động mở ảnh báo cáo tổng hợp để người dùng xem trực tiếp trên màn hình
+        opened = open_image_in_system_viewer(summary_path)
+        if opened:
+            print(f"[LOGGER] Đã tự động mở biểu đồ báo cáo '{os.path.basename(summary_path)}' trên màn hình.")
+        else:
+            print(f"[LOGGER] Bạn có thể xem ảnh báo cáo trực tiếp tại: {summary_path}")

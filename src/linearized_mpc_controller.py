@@ -18,7 +18,10 @@ from src.config import (
     ENABLE_ROADBLOCK_EMERGENCY_STOP, ROADBLOCK_SAFE_STOP_DISTANCE_M, ROADBLOCK_DECELERATION_M_S_2,
     OBSTACLE_SPATIAL_CLUSTER_RANGE_M,
     DEFAULT_ROAD_HALF_WIDTH_M, MAX_LATERAL_ACCEL_M_S_2,
-    EGO_FRONT_OVERHANG_M, EGO_REAR_OVERHANG_M, EGO_HALF_WIDTH_M
+    EGO_FRONT_OVERHANG_M, EGO_REAR_OVERHANG_M, EGO_HALF_WIDTH_M,
+    # --- Tich hop rang buoc Vach Vang (Yellow Line Detector) ---
+    YELLOW_LINE_CLEARANCE_M,
+    ENABLE_YELLOW_LINE_DETECTOR,
 )
 from src.help_functions import calculate_lateral_deviation, normalize_angle
 
@@ -66,6 +69,14 @@ class LinearizedMpcController:
         self.s_traj = None
         self.is_closed_loop = False
         self.current_traj_idx = 0
+
+        # --- Trạng thái ràng buộc vạch vàng (Yellow Line Constraint State) ---
+        # Được cập nhật bởi update_yellow_line_constraint() trước mỗi solve()
+        self._yellow_solid_active: bool  = False   # True khi đang có vạch SOLID
+        self._yellow_road_limit:   float = None    # Giới hạn biên (m) theo Frenet
+        self._yellow_d_line:       float = None    # Khoảng cách ngang tới vạch (m)
+        self._yellow_line_type           = None    # LineType hiện tại
+        self._yellow_blocks_left: bool   = False   # True nếu vạch SOLID bên trái
 
     def reset_nominal(self):
         """Xóa quỹ đạo Warm-start danh định khi chuyển chế độ hoặc sau phanh khẩn cấp"""
@@ -336,7 +347,15 @@ class LinearizedMpcController:
 
         r_clearance = EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M
         road_min = -DEFAULT_ROAD_HALF_WIDTH_M
-        road_max = DEFAULT_ROAD_HALF_WIDTH_M
+        road_max  =  DEFAULT_ROAD_HALF_WIDTH_M
+        min_gap_width = 0.80   # Bề rộng khe hở tối thiểu để xe Ego lọt qua an toàn
+
+        # --- Tích hợp ràng buộc vạch vàng SOLID vào hành lang lái xe ---
+        # Vạch vàng nét liền bên TRÁI (phía âm d < 0) → thắt biên TRÁI road_min >= lim (ví dụ: >= -0.40m)
+        # Tuyệt đối cấm xe đi sang d < -0.40m (vượt vạch vàng)!
+        if self._yellow_solid_active and self._yellow_road_limit is not None:
+            lim = float(self._yellow_road_limit)
+            road_min = max(road_min, lim)   # road_min được nâng từ -5.25m lên -0.40m
 
         # 1. Thu thập các vật cản trên mặt đường trong tầm nhìn cảm biến
         road_obs = []
@@ -470,6 +489,31 @@ class LinearizedMpcController:
                 continue
 
             enforce_sign = curr_sign if must_keep_side else None
+
+            # --- Kịch bản B2: Vạch SOLID phong tỏa phía né bên trái ---
+            # Vạch nét liền bên TRÁI cấm vượt (d < -0.40m bị chặn hoàn toàn).
+            # Xe chỉ có thể né sang PHẢI (d > 0). Kiểm tra xem lề phải có khe trống an toàn không:
+            if (self._yellow_solid_active and self._yellow_blocks_left
+                    and ENABLE_ROADBLOCK_EMERGENCY_STOP
+                    and sl['s_rear'] >= s_ego - 1.0):
+                # Khe trống bên PHẢI: g_high > 0.5 và độ rộng khe >= 0.8m
+                right_gaps = [(g_l, g_h) for g_l, g_h in gaps if g_h > 0.5 and (g_h - g_l) >= 0.8]
+                if not right_gaps:
+                    # Phía phải không có lối né an toàn VÀ bên trái là vạch vàng nét liền cấm vượt
+                    # => PHONG TỎA ĐƯỜNG (ROADBLOCK) => DỪNG XE AN TOÀN TRƯỚC VẠCH VÀNG / VẬT CẢN!
+                    self.is_roadblock = True
+                    self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                    d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else "n/a"
+                    self.roadblock_reason = (
+                        f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + LỀ PHẢI BỊ CHẶN tại s={sl["s_rear"]:.1f}m. '
+                        f'Tuyệt đối cấm vượt vạch vàng nét liền; dừng xe an toàn!'
+                    )
+                    blocking_slice = sl
+                    break
+                else:
+                    # Còn lề phải → BẮT BUỘC ÉP XE NÉ SANG PHẢI (enforce_sign = +1.0)
+                    enforce_sign = +1.0
+
             d_target, _ = self.select_optimal_shift_from_gaps(gaps, preferred_sign=curr_sign, enforce_sign=enforce_sign)
 
             if d_target is None:
@@ -673,6 +717,66 @@ class LinearizedMpcController:
 
         return v_adapted
 
+
+    # ==========================================================================
+    # TÍCH HỢP RÀNG BUỘC VẠCH VÀNG VÀO QP-MPC
+    # ==========================================================================
+
+    def update_yellow_line_constraint(self, yellow_result) -> None:
+        """
+        Nhận kết quả từ RealtimeYellowLineDetector và cập nhật trạng thái
+        ràng buộc vạch vàng nội bộ của controller.
+
+        Được gọi ở đầu vòng lặp chính (main.py) TRƯỚC khi gọi self.solve().
+
+        Args:
+            yellow_result: YellowLineResult từ RealtimeYellowLineDetector.detect().
+                           None hoặc line_type == NONE → xóa ràng buộc.
+
+        Logic:
+            • DASHED  → Cho phép vượt vạch (giữ nguyên hành lang MPC tiêu chuẩn).
+            • SOLID   → Cập nhật self._yellow_road_limit để thu hẹp biên trái
+                        QP solver; kích hoạt self._yellow_solid_active.
+        """
+        from src.yellow_line_detector import LineType  # lazy import tránh circular
+
+        if yellow_result is None:
+            # Không có vạch vàng → reset ràng buộc
+            self._yellow_solid_active  = False
+            self._yellow_road_limit    = None
+            self._yellow_d_line        = None
+            self._yellow_line_type     = None
+            return
+
+        self._yellow_line_type = yellow_result.line_type
+        self._yellow_d_line    = yellow_result.d_yellow_line_m
+
+        if yellow_result.line_type == LineType.SOLID:
+            # --- SOLID: Kích hoạt giới hạn biên thích ứng ---
+            self._yellow_solid_active = True
+
+            if yellow_result.road_max_m is not None:
+                # road_max_m mang giá trị giới hạn biên trái road_min (ví dụ: -0.40m)
+                self._yellow_road_limit = float(yellow_result.road_max_m)
+            else:
+                r_clear = EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M
+                self._yellow_road_limit = -1.75 + r_clear   # mặc định -0.40m
+
+            # Vạch SOLID nằm bên TRÁI xe (phía d < 0 trong hệ tọa độ CARLA Frenet)
+            self._yellow_blocks_left = True
+
+        elif yellow_result.line_type == LineType.DASHED:
+            # --- DASHED: Cho phép vượt vạch bình thường ---
+            self._yellow_solid_active  = False
+            self._yellow_road_limit    = None
+            self._yellow_blocks_left   = False
+
+        else:
+            # NONE
+            self._yellow_solid_active  = False
+            self._yellow_road_limit    = None
+            self._yellow_d_line        = None
+            self._yellow_blocks_left   = False
     def solve_qp_iteration(self, x_init, x_ref, y_ref, theta_ref, v_ref, obstacles=None, is_roadblock=False,
                            x_ref_orig=None, y_ref_orig=None, theta_ref_orig=None):
         """
@@ -723,14 +827,30 @@ class LinearizedMpcController:
             opti.set_initial(X[:, k], x_bar_k)
             opti.set_initial(U[:, k], u_bar_k)
 
-            # Ràng buộc giữ tâm xe nằm trong hành lang mặt đường [-DEFAULT_ROAD_HALF_WIDTH_M, +DEFAULT_ROAD_HALF_WIDTH_M]
+            # Ràng buộc giữ tâm xe nằm trong hành lang mặt đường với biên thích ứng
+            # Kịch bản B (Vạch Liền SOLID): biên trái / phải được thu hẹp bởi Yellow Line Detector
             if x_ref_orig is not None and y_ref_orig is not None and theta_ref_orig is not None:
                 nx_r = -math.sin(float(theta_ref_orig[k]))
                 ny_r = math.cos(float(theta_ref_orig[k]))
                 d_lat_k = (X[0, k] - float(x_ref_orig[k])) * nx_r + (X[1, k] - float(y_ref_orig[k])) * ny_r
-                opti.subject_to(d_lat_k <= DEFAULT_ROAD_HALF_WIDTH_M + eps_road[k])
-                opti.subject_to(d_lat_k >= -DEFAULT_ROAD_HALF_WIDTH_M - eps_road[k])
-                cost += 8000.0 * (eps_road[k] ** 2) + 800.0 * eps_road[k]
+
+                # Tính biên QP thích ứng theo ràng buộc vạch vàng SOLID:
+                # Vạch SOLID bên TRÁI (d < 0) → thắt biên TRÁI qp_road_min >= lim (ví dụ: >= -0.40m)
+                if self._yellow_solid_active and self._yellow_road_limit is not None:
+                    lim = float(self._yellow_road_limit)
+                    qp_road_min = max(-DEFAULT_ROAD_HALF_WIDTH_M, lim)
+                    qp_road_max =  DEFAULT_ROAD_HALF_WIDTH_M
+                else:
+                    qp_road_min = -DEFAULT_ROAD_HALF_WIDTH_M
+                    qp_road_max =  DEFAULT_ROAD_HALF_WIDTH_M
+
+                opti.subject_to(d_lat_k <= qp_road_max + eps_road[k])
+                opti.subject_to(d_lat_k >= qp_road_min - eps_road[k])
+                # Khi vach SOLID: phạt nặng biến bù để xe không vi phạm vạch nét liền mà vẫn đảm bảo solver hội tụ
+                if self._yellow_solid_active:
+                    cost += 500000.0 * (eps_road[k] ** 2) + 50000.0 * eps_road[k]
+                else:
+                    cost += 8000.0 * (eps_road[k] ** 2) + 800.0 * eps_road[k]
 
             # Chi phí bám quỹ đạo đồng bộ thời gian thực tại bước k (t = k * dt)
             fine_x = FINE_X_COEF * (X[0, k] - x_ref[k]) ** 2
@@ -805,10 +925,18 @@ class LinearizedMpcController:
             x_opt = np.array(sol.value(X), dtype=float)
             u_opt = np.array(sol.value(U), dtype=float)
             cost_opt = float(sol.value(cost))
+            if self._yellow_solid_active:
+                self._last_max_eps_road = float(np.max(sol.value(eps_road)))
+            else:
+                self._last_max_eps_road = 0.0
         except Exception:
             x_opt = np.array(opti.debug.value(X), dtype=float)
             u_opt = np.array(opti.debug.value(U), dtype=float)
             cost_opt = float(opti.debug.value(cost))
+            if self._yellow_solid_active:
+                self._last_max_eps_road = float(np.max(opti.debug.value(eps_road)))
+            else:
+                self._last_max_eps_road = 0.0
 
         return x_opt, u_opt, cost_opt
 
@@ -897,6 +1025,31 @@ class LinearizedMpcController:
 
             steer_rad = float(u_opt[0, 0])
             acc_m_s2 = float(u_opt[1, 0])
+
+            # NẾU QUỸ ĐẠO MPC BẮT BUỘC PHẢI QUA VẠCH VÀNG NÉT LIỀN ĐƠN/ĐÔI:
+            # Tự động phanh dừng an toàn trước vạch vàng, tuyệt đối không chạm vạch!
+            if self._yellow_solid_active:
+                # Kiểm tra nếu bất kỳ điểm nào trong quỹ đạo dự đoán x_nom có d_lat vi phạm vạch vàng (< -0.40m)
+                # hoặc biến bù eps_road vượt ngưỡng (> 0.05m):
+                is_crossing_yellow = False
+                if getattr(self, '_last_max_eps_road', 0.0) > 0.05:
+                    is_crossing_yellow = True
+                if self.x_nom is not None and self._yellow_road_limit is not None:
+                    # Kiểm tra tọa độ lateral trong chân trời dự đoán
+                    for k in range(min(self.horizon, self.x_nom.shape[1])):
+                        _, d_pred_k, _, _, _ = self.project_to_frenet(float(self.x_nom[0, k]), float(self.x_nom[1, k]))
+                        if d_pred_k < (self._yellow_road_limit - 0.05):
+                            is_crossing_yellow = True
+                            break
+
+                if is_crossing_yellow:
+                    self.is_roadblock = True
+                    self.roadblock_reason = (
+                        f"Quỹ đạo dự đoán MPC phải đi qua vạch vàng nét liền. "
+                        f"Kích hoạt phanh dừng an toàn trước vạch vàng!"
+                    )
+                    return 0.0, -ROADBLOCK_DECELERATION_M_S_2
+
             self.u_prev = np.array([steer_rad, acc_m_s2])
 
             self.control_buffer["wheel_angle"] = list(u_opt[0, 1:]) + [float(u_opt[0, -1])]

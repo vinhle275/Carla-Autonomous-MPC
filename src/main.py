@@ -4,6 +4,22 @@ import sys
 import traceback
 import numpy as np
 
+# ==============================================================================
+# PHẢI XỬ LÝ TRƯỚC KHI IMPORT BẤT KỲ MODULE NÀO KHÁC (đặc biệt là cv2/pygame)
+# ==============================================================================
+# Lỗi "Aborted (core dumped)" trên WSL/Linux xảy ra vì opencv-python (cv2)
+# tự động đặt QT_QPA_PLATFORM_PLUGIN_PATH trỏ vào thư mục Qt plugin của chính nó.
+# Khi process kết thúc, Qt cố khởi tạo backend xcb nhưng thất bại → Abort.
+# Fix: xóa biến môi trường trước khi cv2 có cơ hội inject, và bắt buộc dùng
+# backend offscreen để Qt không thử mở cửa sổ thực.
+for _env_var in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"):
+    os.environ.pop(_env_var, None)
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# Bắt buộc matplotlib dùng backend Agg (không cần display) — PHẢI ĐẶT TRƯỚC import matplotlib
+import matplotlib
+matplotlib.use("Agg")
+
 # Thêm thư mục hiện tại vào sys.path để import mô-đun src dễ dàng
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -13,7 +29,9 @@ from src.config import (
     ENABLE_CHASE_CAMERA_WINDOW, CAMERA_WINDOW_WIDTH, CAMERA_WINDOW_HEIGHT,
     ENABLE_SPECTATOR_FOLLOW,
     ENABLE_MOVING_OBSTACLES, MOVING_OBSTACLES_CSV_PATH,
-    MAX_CONTROL_BRAKING_M_S_2
+    MAX_CONTROL_BRAKING_M_S_2,
+    ENABLE_YELLOW_LINE_DETECTOR, DEBUG_YELLOW_DRAW,
+    CAM_IMAGE_WIDTH, CAM_IMAGE_HEIGHT, CAM_FOV_DEG,
 )
 from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
@@ -23,6 +41,8 @@ from src.obstacle_detector import ObstacleDetector
 from src.create_obstacles.obstacle_generator import ObstacleManager, MovingObstacleManager
 from src.camera_viewer import CameraViewer
 from src.emergency_safety import EmergencySafetyManager, VehicleMode
+from src.yellow_line_detector import RealtimeYellowLineDetector, LineType
+
 
 def main():
     import argparse
@@ -49,7 +69,7 @@ def main():
 
     # 2. Khởi tạo CARLA Simulator & Spawn Xe tại điểm xuất phát (đọc host từ config.py)
     carla = CarlaSimulator()
-    
+
     x_init = x_traj[0]
     y_init = y_traj[0]
     yaw_init = theta_traj[0]
@@ -89,7 +109,6 @@ def main():
     # 3b. Spawn vat can di dong tu file CSV (neu co va ENABLE_MOVING_OBSTACLES = True)
     moving_obstacle_manager = None
     if ENABLE_MOVING_OBSTACLES:
-        import os
         if os.path.exists(MOVING_OBSTACLES_CSV_PATH):
             moving_obstacle_manager = MovingObstacleManager(carla_sim=carla, dt=dt)
             n_mov = moving_obstacle_manager.spawn_from_csv(MOVING_OBSTACLES_CSV_PATH)
@@ -122,6 +141,17 @@ def main():
     # 7. Khởi tạo Bộ Quản Lý An Toàn & 2 Chế Độ Điều Khiển
     safety_manager = EmergencySafetyManager()
 
+    # --- Khởi tạo Bộ Nhận Diện Vạch Vàng (Yellow Lane Line Detector) ---
+    yellow_detector = None
+    if ENABLE_YELLOW_LINE_DETECTOR:
+        yellow_detector = RealtimeYellowLineDetector(
+            debug_draw=DEBUG_YELLOW_DRAW
+        )
+        print("[YELLOW LINE] Đã khởi tạo RealtimeYellowLineDetector (HSV+IPM+Sliding Window + CARLA Map Ground Truth).")
+
+    # Biến lưu frame RGB mới nhất từ camera_viewer (chia sẻ qua callback)
+    _latest_rgb_frame = [None]   # List để cho phép gán trong closure
+
     current_idx = 0
     print("\n--- BẮT ĐẦU VÒNG LẶP ĐIỀU KHIỂN MPC BÁM ĐƯỜNG & NÉ VẬT CẢN ---")
 
@@ -138,6 +168,29 @@ def main():
 
             # Quét cảm biến nhận thức vật cản theo thời gian thực (Perception)
             detected_obstacles = obstacle_detector.scan(draw_debug=True, life_time=dt * 2)
+
+            # --- NHẬN DIỆN VẠCH VÀNG (Yellow Line Perception) ---
+            yellow_result = None
+            if yellow_detector is not None:
+                rgb_frame = None
+                if camera_viewer is not None and camera_viewer.surface is not None:
+                    try:
+                        import pygame
+                        raw_surf = camera_viewer.surface
+                        rgb_array = pygame.surfarray.array3d(raw_surf)
+                        rgb_frame = np.transpose(rgb_array, (1, 0, 2))
+                    except Exception:
+                        pass
+
+                try:
+                    yellow_result = yellow_detector.detect(
+                        rgb_frame, ego_vehicle=carla.ego_vehicle, carla_map=carla.carla_map
+                    )
+                    # Cập nhật ràng buộc vạch vàng vào MPC controller
+                    if USE_LINEARIZED_QP_MPC and hasattr(mpc_controller, 'update_yellow_line_constraint'):
+                        mpc_controller.update_yellow_line_constraint(yellow_result)
+                except Exception as _yl_err:
+                    pass
 
             # Cập nhật chỉ số waypoint gần nhất
             current_idx = update_reference_point(x0, y0, current_idx, x_traj, y_traj)
@@ -187,11 +240,17 @@ def main():
 
                 if USE_LINEARIZED_QP_MPC:
                     x_state = np.array([x0, y0, theta0, v0])
-                    wheel_angle_rad, acceleration_m_s_2 = mpc_controller.solve(
-                        x_state, x_ref, y_ref, theta_ref, v_ref,
-                        detected_obstacles=detected_obstacles
-                    )
-                    cost_val = mpc_controller.get_optimized_cost()
+                    try:
+                        wheel_angle_rad, acceleration_m_s_2 = mpc_controller.solve(
+                            x_state, x_ref, y_ref, theta_ref, v_ref,
+                            detected_obstacles=detected_obstacles
+                        )
+                        cost_val = mpc_controller.get_optimized_cost()
+                    except Exception as _solve_err:
+                        print(f"\n[MPC PHANH AN TOÀN] Không tìm được đường né: {_solve_err}. Dừng xe an toàn tại chỗ!")
+                        wheel_angle_rad = 0.0
+                        acceleration_m_s_2 = -3.5
+                        cost_val = 0.0
 
                     # Vẽ đường tham chiếu N bước (hiển thị đường cong né lách thời gian thực trên CARLA)
                     if hasattr(mpc_controller, 'x_ref_mod') and mpc_controller.x_ref_mod is not None:
@@ -213,6 +272,18 @@ def main():
                     wheel_angle_rad, acceleration_m_s_2, current_speed=v0
                 )
 
+            # BẢO VỆ TUYỆT ĐỐI KHÔNG CHẠM VẠCH VÀNG:
+            # Nếu khoảng cách từ tâm xe tới vạch vàng <= 1.15m (mép sườn xe cách vạch vàng <= 15cm)
+            # và xe đang chuyển động: Lập tức phanh dừng an toàn không để xe chạm vạch!
+            if (yellow_result is not None
+                    and yellow_result.line_type == LineType.SOLID
+                    and yellow_result.d_yellow_line_m is not None
+                    and yellow_result.d_yellow_line_m <= 1.15):
+                throttle = 0.0
+                brake = 1.0
+                steer = 0.0
+                print(f"\n[DỪNG AN TOÀN TRƯỚC VẠCH VÀNG] Cự ly tới vạch vàng chỉ còn {yellow_result.d_yellow_line_m:.2f}m (mép xe <= 15cm)! Phanh dừng an toàn!")
+
             logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)
 
@@ -227,11 +298,17 @@ def main():
                 elif hasattr(mpc_controller, 'is_roadblock') and mpc_controller.is_roadblock:
                     bypass_txt = "DỪNG AN TOÀN (ROADBLOCK)"
                 elif hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
-                    side_tag = "TRÁI" if mpc_controller.active_obstacle['side_sign'] < 0 else "PHẢI"
+                    side_tag = "PHẢI" if mpc_controller.active_obstacle['side_sign'] > 0 else "TRÁI"
                     bypass_txt = f"NÉ {side_tag} (#{mpc_controller.active_obstacle['id']})"
                 else:
                     bypass_txt = "CHẾ ĐỘ 1: BÁM ĐƯỜNG"
 
+                # Thêm thông tin vạch vàng vào HUD
+                yellow_hud = '---'
+                if yellow_result is not None:
+                    yt = yellow_result.line_type.value
+                    yd = f'{yellow_result.d_yellow_line_m:.2f}m' if yellow_result.d_yellow_line_m is not None else 'N/A'
+                    yellow_hud = f'{yt}|d={yd}|{yellow_result.detect_time_ms:.1f}ms'
                 hud_info = {
                     'speed_kmh': v0 * 3.6,
                     'target_kmh': v_ref[0] * 3.6,
@@ -240,7 +317,8 @@ def main():
                     'obs_count': len(detected_obstacles),
                     'current_idx': current_idx,
                     'total_idx': total_waypoints,
-                    'is_emergency': is_emergency
+                    'is_emergency': is_emergency,
+                    'yellow_line': yellow_hud,
                 }
                 is_viewer_alive = camera_viewer.render(hud_info)
                 if not is_viewer_alive:
@@ -256,7 +334,7 @@ def main():
             if is_emergency:
                 mode_info = f" | [!] {status_info['status_text']}"
             elif hasattr(mpc_controller, 'active_obstacle') and mpc_controller.active_obstacle is not None:
-                side_tag = "TRÁI" if mpc_controller.active_obstacle['side_sign'] < 0 else "PHẢI"
+                side_tag = "PHẢI" if mpc_controller.active_obstacle['side_sign'] > 0 else "TRÁI"
                 mode_info = f" | [CHẾ ĐỘ 1: NÉ {side_tag}]"
             else:
                 mode_info = " | [CHẾ ĐỘ 1: BÁM ĐƯỜNG]"
@@ -268,8 +346,13 @@ def main():
             else:
                 obs_status = f" | OBS: 0{mode_info}"
 
+            yl_tag = ""
+            if yellow_result is not None and yellow_result.line_type == LineType.SOLID:
+                yd_str = f"{yellow_result.d_yellow_line_m:.2f}m" if yellow_result.d_yellow_line_m is not None else ""
+                yl_tag = f" | [VẠCH VÀNG NÉT LIỀN ĐÔI d={yd_str}]"
+
             print(f"Index: {current_idx}/{total_waypoints} | Pos: ({x0:.1f}, {y0:.1f}) | "
-                  f"Speed: {v0:.2f}/{v_ref[0]:.2f} m/s | Steer: {steer:.2f} | Solve: {solve_time_sec:.3f}s{obs_status}", end="\r")
+                  f"Speed: {v0:.2f}/{v_ref[0]:.2f} m/s | Steer: {steer:.2f} | Solve: {solve_time_sec:.3f}s{obs_status}{yl_tag}", end="\r", flush=True)
 
             time.sleep(sleep_time)
 

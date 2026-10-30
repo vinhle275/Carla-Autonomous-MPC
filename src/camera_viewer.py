@@ -160,13 +160,21 @@ class CameraViewer:
         if hud_info.get('is_emergency', False):
             pygame.draw.rect(self.display, (255, 30, 30), (0, 0, self.width, 4))
 
-        # Dòng 2: Hướng dẫn phím và thông tin camera
+        # Dòng 2: Hướng dẫn phím, vạch vàng và thông tin camera
         preset_name = self.VIEW_PRESETS[self.current_preset_idx]['name']
-        t4 = self.font_small.render(f"[{preset_name}] | Nhấn 'V' hoặc 'Tab' để đổi góc nhìn | Vật cản nhìn thấy: {obs_count}", True, (200, 200, 200))
-        t5 = self.font_small.render(f"Tiến độ: {current_idx}/{total_idx}", True, (160, 160, 160))
+        yellow_info = hud_info.get('yellow_line', '---')
+        # Màu theo trạng thái vạch vàng
+        if 'SOLID' in yellow_info:
+            yl_color = (255, 230, 0)    # Vàng đậm = vạch liền CẤM VƯỢT
+        elif 'DASHED' in yellow_info:
+            yl_color = (255, 200, 80)   # Vàng nhạt = vạch đứt, được phép vượt
+        else:
+            yl_color = (160, 160, 160)  # Xám = không phát hiện
+        t4 = self.font_small.render(f"[{preset_name}] | Vật cản: {obs_count} | Vạch vàng: {yellow_info}", True, yl_color)
+        t5 = self.font_small.render(f"Tiến độ: {current_idx}/{total_idx} | Nhấn 'V' đổi góc", True, (160, 160, 160))
 
         self.display.blit(t4, (15, 40))
-        self.display.blit(t5, (self.width - 150, 40))
+        self.display.blit(t5, (self.width - 250, 40))
 
     def destroy(self):
         """Dọn dẹp tài nguyên sensor và đóng cửa sổ Pygame"""

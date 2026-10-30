@@ -47,3 +47,6 @@ Thumbs.db
 
 # Logs & temp files
 *.log
+
+*.csv
+*.png

@@ -126,7 +126,7 @@ USE_LINEARIZED_QP_MPC = True          # Bật chế độ điều khiển MPC Tu
 MPC_MAX_LINEARIZATION_ITER = 2        # Số vòng lặp tuyến tính hóa tại mỗi bước (1-2 vòng lặp)
 MPC_W_SLACK = 20000.0                 # Trọng số phạt biến bù nới lỏng (Slack Variable)
 MPC_W_SLACK_LINEAR = 500.0            # Trọng số phạt bậc 1 cho biến bù (Exact Penalty)
-OBSTACLE_AVOIDANCE_MARGIN_M = 0.35 # 0.5  # Khoảng đệm an toàn dự phòng (m) (35cm cách mép ngoài vật cản)
+OBSTACLE_AVOIDANCE_MARGIN_M = 0.25 # 0.5  # Khoảng đệm an toàn dự phòng (m) (35cm cách mép ngoài vật cản)
 
 # ==============================================================================
 # --- CẤU HÌNH THÍCH ỨNG TỐC ĐỘ KHI GẶP VẬT CẢN (ADAPTIVE SPEED GOVERNOR) ---
@@ -152,7 +152,7 @@ EMERGENCY_MOVING_SPEED_THRESHOLD_MS = 0.2 # Ngưỡng vận tốc (m/s) để x�
 # --- CẤU HÌNH PHANH DỪNG KHẨN CẤP KHI PHONG TỎA ĐƯỜNG (SAFE EMERGENCY STOP) ---
 # ==============================================================================
 ENABLE_ROADBLOCK_EMERGENCY_STOP = True  # True: Tự động phanh dừng an toàn nếu cả 2 bên làn đều bị chặn, không có lối né
-ROADBLOCK_SAFE_STOP_DISTANCE_M = 3.5   # Khoảng cách dừng an toàn trước hàng rào vật cản (m)
+ROADBLOCK_SAFE_STOP_DISTANCE_M = 2.5   # Khoảng cách dừng an toàn trước hàng rào vật cản (m)
 ROADBLOCK_DECELERATION_M_S_2 = 3.0     # Gia tốc hãm phanh êm ái khi dừng khẩn cấp (m/s^2)
 
 # ==============================================================================
@@ -161,7 +161,7 @@ ROADBLOCK_DECELERATION_M_S_2 = 3.0     # Gia tốc hãm phanh êm ái khi dừng
 OBSTACLE_APPROACH_RAMP_M = 13.0         # Chiều dài dốc mở lái trước mũi xe - đuôi vật cản (m)
 OBSTACLE_APPROACH_MARGIN_M = 2.0       # Khoảng đệm hoàn tất 100% mở lái trước đuôi vật cản (m)
 OBSTACLE_HOLD_DISTANCE_M = 2.0        # Khoảng đệm giữ làn sau khi đuôi xe vượt qua mũi vật cản (m)
-OBSTACLE_RETURN_RAMP_M = 10.0         # Chiều dài dốc trả lái êm về tim đường (15m giúp góc nhập làn nhỏ, không vọt lố)
+OBSTACLE_RETURN_RAMP_M = 8.0         # Chiều dài dốc trả lái êm về tim đường (15m giúp góc nhập làn nhỏ, không vọt lố)
 
 # ==============================================================================
 # --- CẤU HÌNH GÓC NHÌN & CỬA SỔ THEO DÕI XE (FOLLOW CAMERA VIEWER) ---

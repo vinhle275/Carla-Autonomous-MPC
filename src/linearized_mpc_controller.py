@@ -271,11 +271,14 @@ class LinearizedMpcController:
         if enforce_sign is not None:
             same_side_gaps = []
             for g_low, g_high in valid_gaps:
-                if enforce_sign > 0 and g_high >= 1.65:
+                # Nếu khe trống chứa tim đường (d = 0) và đủ bề rộng -> LUÔN HỢP LỆ ĐỂ TRẢ VỀ LÀN CHÍNH (VẠCH XANH LÁ)!
+                if g_low <= 0.15 and g_high >= -0.15 and (g_high - g_low) >= 0.8:
+                    same_side_gaps.append((g_low, g_high))
+                elif enforce_sign > 0 and g_high >= 1.50:
                     sub_low, sub_high = max(g_low, 0.0), g_high
                     if (sub_high - sub_low) >= 0.8:
                         same_side_gaps.append((sub_low, sub_high))
-                elif enforce_sign < 0 and g_low <= -1.65:
+                elif enforce_sign < 0 and g_low <= -1.50:
                     sub_low, sub_high = g_low, min(g_high, 0.0)
                     if (sub_high - sub_low) >= 0.8:
                         same_side_gaps.append((sub_low, sub_high))
@@ -490,38 +493,15 @@ class LinearizedMpcController:
 
             enforce_sign = curr_sign if must_keep_side else None
 
-            # --- Kịch bản B2: Vạch SOLID phong tỏa phía né bên trái ---
-            # Vạch nét liền bên TRÁI cấm vượt (d < -0.40m bị chặn hoàn toàn).
-            # Xe chỉ có thể né sang PHẢI (d > 0). Kiểm tra xem lề phải có khe trống an toàn không:
-            if (self._yellow_solid_active and self._yellow_blocks_left
-                    and ENABLE_ROADBLOCK_EMERGENCY_STOP
-                    and sl['s_rear'] >= s_ego - 1.0):
-                # Khe trống bên PHẢI: g_high > 0.5 và độ rộng khe >= 0.8m
-                right_gaps = [(g_l, g_h) for g_l, g_h in gaps if g_h > 0.5 and (g_h - g_l) >= 0.8]
-                if not right_gaps:
-                    # Phía phải không có lối né an toàn VÀ bên trái là vạch vàng nét liền cấm vượt
-                    # => PHONG TỎA ĐƯỜNG (ROADBLOCK) => DỪNG XE AN TOÀN TRƯỚC VẠCH VÀNG / VẬT CẢN!
-                    self.is_roadblock = True
-                    self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else "n/a"
-                    self.roadblock_reason = (
-                        f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + LỀ PHẢI BỊ CHẶN tại s={sl["s_rear"]:.1f}m. '
-                        f'Tuyệt đối cấm vượt vạch vàng nét liền; dừng xe an toàn!'
-                    )
-                    blocking_slice = sl
-                    break
-                else:
-                    # Còn lề phải → BẮT BUỘC ÉP XE NÉ SANG PHẢI (enforce_sign = +1.0)
-                    enforce_sign = +1.0
-
             d_target, _ = self.select_optimal_shift_from_gaps(gaps, preferred_sign=curr_sign, enforce_sign=enforce_sign)
 
             if d_target is None:
                 # Phía đang né (enforce_sign) đã bị vật cản mới bít kín và không đủ khoảng cách dọc để đảo sang bên kia -> Dừng lại!
-                if ENABLE_ROADBLOCK_EMERGENCY_STOP and sl['s_rear'] >= s_ego - 1.0:
+                dist_to_sl = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                if ENABLE_ROADBLOCK_EMERGENCY_STOP and dist_to_sl <= 15.0:
                     self.is_roadblock = True
-                    self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    side_str = "PHẢI" if enforce_sign > 0 else "TRÁI"
+                    self.roadblock_barrier_dist = dist_to_sl
+                    side_str = "PHẢI" if (enforce_sign and enforce_sign > 0) else "TRÁI"
                     self.roadblock_reason = (
                         f"PHONG TỎA ĐƯỜNG (STAGGERED ROADBLOCK) tại s={sl['s_rear']:.1f}m. "
                         f"Vật cản so le bít kín cả 2 làn đường (làn {side_str} bị chặn và khoảng cách dọc không đủ để đảo làn an toàn)."
@@ -613,11 +593,16 @@ class LinearizedMpcController:
         hold_corridor_d = 0.0
         hold_corridor_s_end = -1e9
         if self.is_roadblock and blocking_slice is not None:
-            if abs(curr_d_target) > 0.2:
-                hold_corridor_d = curr_d_target
-            elif abs(d_ego) > 0.35:
-                hold_corridor_d = d_ego
-            hold_corridor_s_end = blocking_slice['s_front'] + 15.0
+            # Chỉ giữ độ lệch né nếu tim đường bị vật cản chặn trực tiếp
+            center_is_blocked = any(
+                (b_l < 0.30 and b_h > -0.30) for b_l, b_h in blocking_slice['blocked']
+            )
+            if center_is_blocked:
+                if abs(curr_d_target) > 0.2:
+                    hold_corridor_d = curr_d_target
+                elif abs(d_ego) > 0.35:
+                    hold_corridor_d = d_ego
+                hold_corridor_s_end = blocking_slice['s_front'] + 15.0
 
         n_ref = len(x_ref)
         x_ref_mod = np.copy(x_ref)

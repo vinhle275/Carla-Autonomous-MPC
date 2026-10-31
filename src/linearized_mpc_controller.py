@@ -77,6 +77,7 @@ class LinearizedMpcController:
         self._yellow_d_line:       float = None    # Khoảng cách ngang tới vạch (m)
         self._yellow_line_type           = None    # LineType hiện tại
         self._yellow_blocks_left: bool   = False   # True nếu vạch SOLID bên trái
+        self._yellow_solid_hold_steps: int = 0     # Bộ đếm giữ trạng thái chống nhấp nháy cảm biến (Hysteresis)
 
     def reset_nominal(self):
         """Xóa quỹ đạo Warm-start danh định khi chuyển chế độ hoặc sau phanh khẩn cấp"""
@@ -230,11 +231,32 @@ class LinearizedMpcController:
             return 0.0, 0.0, 0.0, 0.0
         return float(min(s_vals)), float(max(s_vals)), float(min(d_vals)), float(max(d_vals))
 
+    def get_legal_corridor_bounds(self):
+        """
+        Xác định Hành lang Pháp lý Động [road_min, road_max] thống nhất cho toàn bộ chu kỳ MPC:
+        - Bình thường / Vạch đứt (DASHED): [-5.25m, +5.25m]
+        - Vạch vàng nét liền (SOLID) bên trái: [lim, +5.25m] với lim = -1.75 + (1.0 + 0.35) = -0.40m
+        """
+        road_min = -DEFAULT_ROAD_HALF_WIDTH_M
+        road_max =  DEFAULT_ROAD_HALF_WIDTH_M
+        is_yellow_solid = bool(self._yellow_solid_active and self._yellow_blocks_left)
+        if is_yellow_solid:
+            lim = float(self._yellow_road_limit) if self._yellow_road_limit is not None else (-1.75 + EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
+            road_min = max(road_min, lim)
+        return road_min, road_max, is_yellow_solid
+
     @staticmethod
-    def find_free_gaps_in_corridor(blocked_intervals, road_min=-DEFAULT_ROAD_HALF_WIDTH_M, road_max=DEFAULT_ROAD_HALF_WIDTH_M, min_gap_width=0.30):
-        """Tìm danh sách các khe trống khả dụng [g_low, g_high] cho tâm xe Ego trên mặt cắt ngang"""
+    def find_free_gaps_in_corridor(blocked_intervals, road_min=-DEFAULT_ROAD_HALF_WIDTH_M, road_max=DEFAULT_ROAD_HALF_WIDTH_M, min_gap_width=0.20):
+        """
+        Tìm danh sách các khe trống khả dụng [g_low, g_high] cho tâm xe Ego trên mặt cắt ngang.
+        Lưu ý: blocked_intervals đã mở rộng theo r_clearance (nửa thân xe + lề an toàn = 1.45m)
+        và road_min đã tính lề an toàn vạch vàng (1.35m), nên bất kỳ khe trống nào có
+        (g_high - g_low) >= 0.20m đều tương ứng với bề rộng vật lý thực tế >= 3.00m.
+        """
+        if road_min >= road_max:
+            return []
         if not blocked_intervals:
-            return [(road_min, road_max)]
+            return [(road_min, road_max)] if (road_max - road_min) >= min_gap_width else []
         sorted_iv = sorted(blocked_intervals, key=lambda iv: iv[0])
         merged = []
         for low, high in sorted_iv:
@@ -257,27 +279,42 @@ class LinearizedMpcController:
         return [(g_l, g_h) for g_l, g_h in free_gaps if (g_h - g_l) >= min_gap_width]
 
     @staticmethod
-    def select_optimal_shift_from_gaps(valid_gaps, preferred_sign=None, enforce_sign=None):
+    def select_optimal_shift_from_gaps(valid_gaps, preferred_sign=None, enforce_sign=None,
+                                       yellow_solid_active=False, yellow_limit=-0.40,
+                                       has_oncoming_traffic=False, min_gap_width=0.20):
         """
-        Chọn vị trí dịch tâm xe d_target trong khe trống:
-        - Nếu enforce_sign được bật (xe đã cam kết hướng né và không đủ khoảng dọc để đảo làn),
-          bắt buộc chỉ tìm khe trống cùng phía enforce_sign; nếu phía đó bị bít kín -> trả về None (Roadblock).
-        - Đảm bảo biên độ dịch tối thiểu 1.65m khi né để dứt khoát thoát khỏi vùng siêu phẳng của vật cản.
+        Chiến lược chọn vị trí dịch tâm xe d_target bất đối xứng tuân thủ Luật Giao Thông:
+        1. Nếu vạch vàng SOLID hoặc có xe ngược chiều đang chạy tới: tuyệt đối cấm các khe trống vượt sang làn trái (d < yellow_limit).
+        2. Nếu vạch vàng DASHED và thông thoáng: ưu tiên né PHẢI (cùng chiều); chỉ mượn làn TRÁI khi bên phải bị bít kín (phạt +0.85m).
+        3. Không ép biên độ cứng 1.65m nếu khe trống tại tâm làn đã đủ rộng cho OBB của xe đi qua.
         """
         if not valid_gaps:
             return None, None
 
-        candidate_gaps = valid_gaps
+        # Lọc khe trống theo luật vạch vàng & xe ngược chiều
+        legal_gaps = []
+        for g_low, g_high in valid_gaps:
+            if yellow_solid_active or has_oncoming_traffic:
+                sub_low = max(g_low, yellow_limit)
+                if (g_high - sub_low) >= min_gap_width:
+                    legal_gaps.append((sub_low, g_high))
+            else:
+                legal_gaps.append((g_low, g_high))
+
+        if not legal_gaps:
+            return None, None
+
+        candidate_gaps = legal_gaps
         if enforce_sign is not None:
             same_side_gaps = []
-            for g_low, g_high in valid_gaps:
-                if enforce_sign > 0 and g_high >= 1.65:
-                    sub_low, sub_high = max(g_low, 0.0), g_high
-                    if (sub_high - sub_low) >= 0.8:
+            for g_low, g_high in legal_gaps:
+                if enforce_sign > 0 and g_high > 0.10:
+                    sub_low, sub_high = max(g_low, -0.15), g_high
+                    if (sub_high - sub_low) >= min_gap_width:
                         same_side_gaps.append((sub_low, sub_high))
-                elif enforce_sign < 0 and g_low <= -1.65:
-                    sub_low, sub_high = g_low, min(g_high, 0.0)
-                    if (sub_high - sub_low) >= 0.8:
+                elif enforce_sign < 0 and g_low < -0.10:
+                    sub_low, sub_high = g_low, min(g_high, 0.15)
+                    if (sub_high - sub_low) >= min_gap_width:
                         same_side_gaps.append((sub_low, sub_high))
             if not same_side_gaps:
                 return None, None
@@ -287,22 +324,24 @@ class LinearizedMpcController:
         best_cost = float('inf')
         best_gap = None
         for g_low, g_high in candidate_gaps:
-            pad = min(0.15, 0.20 * (g_high - g_low))
+            pad = min(0.15, 0.25 * (g_high - g_low))
             d_cand = float(np.clip(0.0, g_low + pad, g_high - pad))
-            if 0.0 < abs(d_cand) < 1.65:
-                # Mở rộng về phía khe trống để tâm xe cách đủ xa siêu phẳng của vật cản
-                if d_cand > 0:
-                    d_cand = min(1.65, g_high - pad)
-                else:
-                    d_cand = max(-1.65, g_low + pad)
 
             cost = abs(d_cand)
-            if preferred_sign is not None and d_cand != 0.0 and (d_cand * preferred_sign < 0):
-                cost += 1.50  # Phạt nặng việc đổi chiều làn đột ngột để ưu tiên dời tiếp cùng bên khi khe trống khả dụng
-            elif preferred_sign is None and abs(d_cand) > 0.0:
+            # Phạt bất đối xứng theo luật giao thông:
+            # Lấn qua vạch vàng đứt sang làn ngược chiều (d_cand < yellow_limit) chịu phạt +0.85 để luôn ưu tiên né PHẢI
+            if d_cand < yellow_limit:
+                cost += 0.85
+            elif d_cand < -0.05 and OBSTACLE_PREFER_BYPASS_SIDE == 'right':
+                cost += 0.15
+
+            if preferred_sign is not None and abs(d_cand) > 0.05 and (d_cand * preferred_sign < 0):
+                cost += 1.50  # Phạt nặng việc đổi chiều làn đột ngột để giữ hành lang ổn định
+            elif preferred_sign is None and abs(d_cand) > 0.05:
                 pref_dir = -1.0 if OBSTACLE_PREFER_BYPASS_SIDE == 'left' else 1.0
                 if d_cand * pref_dir < 0:
                     cost += 0.10
+
             if cost < best_cost:
                 best_cost = cost
                 best_d = d_cand
@@ -335,37 +374,37 @@ class LinearizedMpcController:
 
     def compute_local_reference_shift(self, x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles):
         """
-        Quy hoạch đường bao tham chiếu cục bộ:
+        Quy hoạch đường bao tham chiếu cục bộ trên Hành lang Pháp lý Động [road_min, road_max]:
+        - Tự động lọc bỏ vật cản nằm bên kia vạch vàng SOLID (làn ngược chiều).
+        - Ưu tiên bất đối xứng né PHẢI; chỉ mượn làn TRÁI khi vạch DASHED, bên phải bị chặn và không có xe ngược chiều.
         - Duy trì đường bao cực đại phẳng (Flat Outer Envelope) giữa các vật cản cùng phía.
-        - Đánh giá tuần tự từng lát cắt ngang (Cross-sectional Slices): nếu xe đang ở trong làn né
-          mà phát hiện vật cản mới phía trước bít kín làn đang né và không đủ khoảng cách dọc để đảo làn,
-          kích hoạt dừng khẩn cấp (Roadblock) ngay trên chính làn né hiện tại.
+        - Kích hoạt dừng an toàn (Roadblock) từ xa nếu không còn khe trống hợp pháp nào >= min_gap_width.
         """
         x_ego, y_ego = float(x_init[0]), float(x_init[1])
         s_ego, d_ego, _, _, idx_ego = self.project_to_frenet(x_ego, y_ego, hint_idx=self.current_traj_idx)
         self.current_traj_idx = idx_ego
 
         r_clearance = EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M
-        road_min = -DEFAULT_ROAD_HALF_WIDTH_M
-        road_max  =  DEFAULT_ROAD_HALF_WIDTH_M
-        min_gap_width = 0.80   # Bề rộng khe hở tối thiểu để xe Ego lọt qua an toàn
+        road_min, road_max, is_yellow_solid = self.get_legal_corridor_bounds()
+        yellow_limit = road_min if is_yellow_solid else (-1.75 + EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
+        min_gap_width = 0.20   # Tương ứng bề rộng khe hở vật lý >= 3.00m (đã cộng thân xe 2.0m + lề 2 bên)
 
-        # --- Tích hợp ràng buộc vạch vàng SOLID vào hành lang lái xe ---
-        # Vạch vàng nét liền bên TRÁI (phía âm d < 0) → thắt biên TRÁI road_min >= lim (ví dụ: >= -0.40m)
-        # Tuyệt đối cấm xe đi sang d < -0.40m (vượt vạch vàng)!
-        if self._yellow_solid_active and self._yellow_road_limit is not None:
-            lim = float(self._yellow_road_limit)
-            road_min = max(road_min, lim)   # road_min được nâng từ -5.25m lên -0.40m
-
-        # 1. Thu thập các vật cản trên mặt đường trong tầm nhìn cảm biến
+        # 1. Thu thập các vật cản trên mặt đường trong tầm nhìn cảm biến & kiểm tra xe động làn ngược chiều
         road_obs = []
+        has_oncoming_traffic = False
         if detected_obstacles:
             for obs in detected_obstacles:
                 s_r, s_f, d_min, d_max = self.compute_obstacle_frenet_bounds(obs)
-                # Khi có vạch vàng SOLID bên trái: bỏ qua các vật cản nằm hoàn toàn ở làn ngược chiều bên kia vạch vàng
-                if self._yellow_solid_active and self._yellow_blocks_left:
-                    if (d_max + r_clearance) <= (road_min + 0.05):
-                        continue
+                obs_spd = float(obs.get('speed', 0.0))
+
+                # Kiểm tra nếu có vật cản di động ở làn bên trái (d_min < -1.2m) trong tầm 35m phía trước -> Cấm mượn làn trái!
+                if obs_spd > 0.5 and d_min < -1.20 and (s_f >= s_ego - 5.0) and (s_r <= s_ego + 35.0):
+                    has_oncoming_traffic = True
+
+                # Khi có vạch vàng SOLID bên trái: lọc bỏ hoàn toàn các vật cản nằm bên kia vạch vàng (làn ngược chiều)
+                if is_yellow_solid and (d_max + r_clearance) <= (road_min + 0.05):
+                    continue
+
                 if (s_f >= s_ego - 12.0) and (s_r <= s_ego + SENSOR_DETECTION_RANGE_M) and (d_max >= road_min - 1.5) and (d_min <= road_max + 1.5):
                     obs_c = dict(obs)
                     obs_c['s_rear'] = s_r
@@ -385,9 +424,8 @@ class LinearizedMpcController:
             s_ret_done = grp_front + OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M + 2.0
             if s_ego > s_ret_done:
                 to_remove.append(obs_id)
-            elif self._yellow_solid_active and self._yellow_blocks_left:
-                if (obs_item.get('d_max', 0.0) + r_clearance) <= (road_min + 0.05):
-                    to_remove.append(obs_id)
+            elif is_yellow_solid and (obs_item.get('d_max', 0.0) + r_clearance) <= (road_min + 0.05):
+                to_remove.append(obs_id)
         for obs_id in to_remove:
             del self.active_chain[obs_id]
 
@@ -426,6 +464,8 @@ class LinearizedMpcController:
             if grp_front + OBSTACLE_HOLD_DISTANCE_M >= s_ego:
                 dist_to_lock = (obs_item['s_rear'] - EGO_FRONT_OVERHANG_M) - s_ego
                 if dist_to_lock <= lock_dist:
+                    if is_yellow_solid and obs_item['side_sign'] < 0:
+                        continue
                     committed_sign = obs_item['side_sign']
                     if abs(obs_item.get('d_target', 0.0)) > abs(committed_d):
                         committed_d = obs_item.get('d_target', obs_item['side_sign'] * obs_item['A_shift'])
@@ -433,7 +473,7 @@ class LinearizedMpcController:
                         prev_s_front = obs_item['s_front']
 
         if committed_sign is None and abs(d_ego) >= 0.65:
-            if not (self._yellow_solid_active and self._yellow_blocks_left and d_ego < 0):
+            if not (is_yellow_solid and d_ego < 0):
                 committed_sign = -1.0 if d_ego < 0 else 1.0
                 committed_d = d_ego
 
@@ -445,9 +485,15 @@ class LinearizedMpcController:
             for sl in slices:
                 if sl['s_rear'] <= s0_rear + 16.0:
                     lookahead_blocked.extend(sl['blocked'])
-            common_init_gaps = self.find_free_gaps_in_corridor(lookahead_blocked, road_min, road_max)
+            common_init_gaps = self.find_free_gaps_in_corridor(lookahead_blocked, road_min, road_max, min_gap_width=min_gap_width)
             if common_init_gaps:
-                d_init_common, _ = self.select_optimal_shift_from_gaps(common_init_gaps)
+                d_init_common, _ = self.select_optimal_shift_from_gaps(
+                    common_init_gaps,
+                    yellow_solid_active=is_yellow_solid,
+                    yellow_limit=yellow_limit,
+                    has_oncoming_traffic=has_oncoming_traffic,
+                    min_gap_width=min_gap_width,
+                )
                 if d_init_common is not None and abs(d_init_common) > 0.05:
                     initial_pref_sign = -1.0 if d_init_common < 0 else 1.0
 
@@ -458,10 +504,10 @@ class LinearizedMpcController:
 
         for sl in slices:
             affects_lane = any(
-                (b_l < 0.15 and b_h > -0.15) or (min(abs(b_l), abs(b_h)) < OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M)
+                (b_l < 0.05 and b_h > -0.05)
                 for b_l, b_h in sl['blocked']
             )
-            gaps = self.find_free_gaps_in_corridor(sl['blocked'], road_min, road_max)
+            gaps = self.find_free_gaps_in_corridor(sl['blocked'], road_min, road_max, min_gap_width=min_gap_width)
 
             # Chỉ kiểm tra Roadblock đối với lát cắt nằm ở phía trước tâm xe (không báo dừng với lát cắt xe đang đi ngang sườn)
             is_ahead_of_ego = (sl['s_rear'] >= s_ego + 0.5)
@@ -473,9 +519,10 @@ class LinearizedMpcController:
                 for o in sl['obs_list']:
                     oid = o['id']
                     if oid in self.active_chain and (self.active_chain[oid]['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego) <= lock_dist:
-                        must_keep_side = True
-                        curr_sign = self.active_chain[oid]['side_sign']
-                        break
+                        if not (is_yellow_solid and self.active_chain[oid]['side_sign'] < 0):
+                            must_keep_side = True
+                            curr_sign = self.active_chain[oid]['side_sign']
+                            break
                 # (b) Khoảng trống dọc từ lát cắt trước đó đến lát cắt này không đủ để xe đảo từ bên này sang bên kia
                 if not must_keep_side and prev_s_front is not None:
                     ds_gap = sl['s_rear'] - prev_s_front
@@ -494,67 +541,49 @@ class LinearizedMpcController:
                 if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    self.roadblock_reason = (
-                        f"BÍT KÍN TOÀN BỘ MẶT ĐƯỜNG tại s={sl['s_rear']:.1f}m. "
-                        f"Không còn khe trống nào đủ bề rộng (>= {min_gap_width:.2f}m) trên mặt đường [{road_min:.2f}m, +{road_max:.2f}m]."
-                    )
+                    if is_yellow_solid:
+                        d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else "n/a"
+                        self.roadblock_reason = (
+                            f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + LÀN PHẢI BỊ CHẶN tại s={sl["s_rear"]:.1f}m. '
+                            f'Không còn khe trống hợp pháp trong [{road_min:.2f}m, +{road_max:.2f}m]; dừng xe an toàn!'
+                        )
+                    else:
+                        self.roadblock_reason = (
+                            f"BÍT KÍN TOÀN BỘ MẶT ĐƯỜNG tại s={sl['s_rear']:.1f}m. "
+                            f"Không còn khe trống nào đủ bề rộng trên mặt đường [{road_min:.2f}m, +{road_max:.2f}m]."
+                        )
                     blocking_slice = sl
                     break
                 continue
 
             enforce_sign = curr_sign if must_keep_side else None
 
-            # --- Kịch bản B2: Vạch SOLID phong tỏa phía né bên trái ---
-            # Vạch nét liền bên TRÁI cấm vượt (d < road_min bị chặn hoàn toàn).
-            # Lưu ý: gaps đã được cắt theo [road_min, road_max] (tức g_l >= -0.40m).
-            if (self._yellow_solid_active and self._yellow_blocks_left
-                    and ENABLE_ROADBLOCK_EMERGENCY_STOP
-                    and is_ahead_of_ego):
-                valid_yellow_gaps = [(g_l, g_h) for g_l, g_h in gaps if (g_h - g_l) >= min_gap_width]
-                blocks_center = any(b_l < 0.05 and b_h > -0.05 for b_l, b_h in sl['blocked'])
-                if blocks_center:
-                    # Vật cản chặn tim đường -> bắt buộc phải có khe trống đủ rộng bên PHẢI (g_h >= 1.2m)
-                    right_bypass_gaps = [
-                        (g_l, g_h) for g_l, g_h in valid_yellow_gaps
-                        if g_h >= 1.20 and (g_h - max(g_l, 0.0)) >= min_gap_width
-                    ]
-                    if not right_bypass_gaps:
-                        self.is_roadblock = True
-                        self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+            d_target, _ = self.select_optimal_shift_from_gaps(
+                gaps,
+                preferred_sign=curr_sign,
+                enforce_sign=enforce_sign,
+                yellow_solid_active=is_yellow_solid,
+                yellow_limit=yellow_limit,
+                has_oncoming_traffic=has_oncoming_traffic,
+                min_gap_width=min_gap_width,
+            )
+
+            if d_target is None:
+                if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
+                    self.is_roadblock = True
+                    self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                    if is_yellow_solid:
                         d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else "n/a"
                         self.roadblock_reason = (
                             f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + LỀ PHẢI BỊ CHẶN tại s={sl["s_rear"]:.1f}m. '
                             f'Tuyệt đối cấm vượt vạch vàng nét liền; dừng xe an toàn!'
                         )
-                        blocking_slice = sl
-                        break
                     else:
-                        enforce_sign = +1.0
-                elif not valid_yellow_gaps:
-                    self.is_roadblock = True
-                    self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else "n/a"
-                    self.roadblock_reason = (
-                        f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + HÀNH LANG HẸP tại s={sl["s_rear"]:.1f}m. '
-                        f'Dừng xe an toàn!'
-                    )
-                    blocking_slice = sl
-                    break
-
-            d_target, _ = self.select_optimal_shift_from_gaps(gaps, preferred_sign=curr_sign, enforce_sign=enforce_sign)
-            if d_target is not None and self._yellow_solid_active and self._yellow_blocks_left:
-                d_target = max(d_target, road_min + 0.05)
-
-            if d_target is None:
-                # Phía đang né (enforce_sign) đã bị vật cản mới bít kín và không đủ khoảng cách dọc để đảo sang bên kia -> Dừng lại!
-                if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
-                    self.is_roadblock = True
-                    self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    side_str = "PHẢI" if (enforce_sign is not None and enforce_sign > 0) else "TRÁI"
-                    self.roadblock_reason = (
-                        f"PHONG TỎA ĐƯỜNG (STAGGERED ROADBLOCK) tại s={sl['s_rear']:.1f}m. "
-                        f"Vật cản so le bít kín cả 2 làn đường (làn {side_str} bị chặn và khoảng cách dọc không đủ để đảo làn an toàn)."
-                    )
+                        side_str = "PHẢI" if (enforce_sign is not None and enforce_sign > 0) else "TRÁI"
+                        self.roadblock_reason = (
+                            f"PHONG TỎA ĐƯỜNG (STAGGERED ROADBLOCK) tại s={sl['s_rear']:.1f}m. "
+                            f"Vật cản so le bít kín cả 2 làn đường (làn {side_str} bị chặn và khoảng cách dọc không đủ để đảo làn an toàn)."
+                        )
                     blocking_slice = sl
                     break
                 continue
@@ -654,8 +683,6 @@ class LinearizedMpcController:
         ahead_chain = [o for o in chain_list if o['s_front'] + OBSTACLE_HOLD_DISTANCE_M >= s_ego]
         if ahead_chain:
             self.active_obstacle = min(ahead_chain, key=lambda o: o['s_rear'])
-        elif chain_list:
-            self.active_obstacle = max(chain_list, key=lambda o: o['s_front'])
         else:
             self.active_obstacle = None
 
@@ -714,32 +741,37 @@ class LinearizedMpcController:
         if n_ref > 1:
             theta_ref_mod[-1] = theta_ref_mod[-2]
 
-        # Log quyết định né Trái/Phải hoặc Dừng lại (Roadblock) ra Terminal
+        # Log quyết định né Trái/Phải hoặc Dừng lại (Roadblock) ra Terminal (chỉ in khi có thay đổi trạng thái)
+        log_key = None
         current_decision = None
         if self.is_roadblock:
             d_barrier = self.roadblock_barrier_dist if self.roadblock_barrier_dist is not None else 0.0
+            log_key = f"ROADBLOCK|{self.roadblock_reason}"
             current_decision = f"ROADBLOCK_STOP | dist={d_barrier:.1f}m | {self.roadblock_reason}"
         elif self.active_obstacle is not None and abs(self.active_obstacle.get('d_target', 0.0)) > 0.05:
             obs = self.active_obstacle
             d_t = obs.get('d_target', obs['side_sign'] * obs['A_shift'])
             side_str = "PHẢI (Right)" if d_t > 0 else "TRÁI (Left)"
             dist_to_o = max(0.0, (obs['s_rear'] - EGO_FRONT_OVERHANG_M) - s_ego)
+            log_key = f"BYPASS|{obs.get('id')}|{side_str}|{d_t:+.1f}"
             current_decision = (
                 f"BYPASS_{side_str} | Target d={d_t:+.2f}m | Obstacle at s={obs['s_rear']:.1f}m "
                 f"(cách mũi xe {dist_to_o:.1f}m, d_obs=[{obs['d_min']:.2f}m, {obs['d_max']:.2f}m])"
             )
         elif abs(d_ego) > 0.2:
+            log_key = "RETURNING_TO_CENTER"
             current_decision = f"RETURNING_TO_CENTER | d_ego={d_ego:+.2f}m -> 0.0m"
         else:
+            log_key = "TRACKING_LANE_CENTER"
             current_decision = "TRACKING_LANE_CENTER"
 
-        if current_decision != self.last_log_state:
-            self.last_log_state = current_decision
+        if log_key != self.last_log_state:
+            self.last_log_state = log_key
             if self.is_roadblock:
                 print(f"\033[91;1m[MPC DECISION - DỪNG LẠI (STOP)]\033[0m s_ego={s_ego:.1f}m | v_ego={float(x_init[3])*3.6:.1f}km/h | {current_decision}")
-            elif "BYPASS" in current_decision:
+            elif "BYPASS" in log_key:
                 print(f"\033[92;1m[MPC DECISION - NÉ VẬT CẢN]\033[0m s_ego={s_ego:.1f}m | v_ego={float(x_init[3])*3.6:.1f}km/h | {current_decision}")
-            elif "RETURNING" in current_decision:
+            elif "RETURNING" in log_key:
                 print(f"\033[93m[MPC DECISION - NHẬP LÀN]\033[0m s_ego={s_ego:.1f}m | Đang trả lái về tim đường...")
 
         return x_ref_mod, y_ref_mod, theta_ref_mod, np.copy(v_ref), (len(chain_list) > 0 or abs(hold_corridor_d) > 0.2)
@@ -749,9 +781,13 @@ class LinearizedMpcController:
         v_adapted = np.copy(v_ref_base)
         s_ego, _, _, _, _ = self.project_to_frenet(x_init[0], x_init[1], hint_idx=self.current_traj_idx)
 
-        if self.active_obstacle is not None:
-            s_rear = self.active_obstacle.get('group_s_rear', self.active_obstacle.get('s_rear', s_ego + 10.0))
-            s_front = self.active_obstacle.get('group_s_front', self.active_obstacle.get('s_front', s_rear + 2.0))
+        ref_obs = self.active_obstacle
+        if ref_obs is None and self.active_chain:
+            ref_obs = max(self.active_chain.values(), key=lambda o: o.get('group_s_front', o['s_front']))
+
+        if ref_obs is not None:
+            s_rear = ref_obs.get('group_s_rear', ref_obs.get('s_rear', s_ego + 10.0))
+            s_front = ref_obs.get('group_s_front', ref_obs.get('s_front', s_rear + 2.0))
 
             dist_to_obs = (s_rear - EGO_FRONT_OVERHANG_M) - s_ego
             dist_after_obs = s_ego - (s_front + OBSTACLE_HOLD_DISTANCE_M)
@@ -778,35 +814,30 @@ class LinearizedMpcController:
     def update_yellow_line_constraint(self, yellow_result) -> None:
         """
         Nhận kết quả từ RealtimeYellowLineDetector và cập nhật trạng thái
-        ràng buộc vạch vàng nội bộ của controller.
+        ràng buộc vạch vàng nội bộ của controller (có bộ lọc trễ Hysteresis chống nhấp nháy).
 
         Được gọi ở đầu vòng lặp chính (main.py) TRƯỚC khi gọi self.solve().
-
-        Args:
-            yellow_result: YellowLineResult từ RealtimeYellowLineDetector.detect().
-                           None hoặc line_type == NONE → xóa ràng buộc.
-
-        Logic:
-            • DASHED  → Cho phép vượt vạch (giữ nguyên hành lang MPC tiêu chuẩn).
-            • SOLID   → Cập nhật self._yellow_road_limit để thu hẹp biên trái
-                        QP solver; kích hoạt self._yellow_solid_active.
         """
         from src.yellow_line_detector import LineType  # lazy import tránh circular
 
-        if yellow_result is None:
-            # Không có vạch vàng → reset ràng buộc
-            self._yellow_solid_active  = False
-            self._yellow_road_limit    = None
-            self._yellow_d_line        = None
-            self._yellow_line_type     = None
+        if yellow_result is None or yellow_result.line_type == LineType.NONE:
+            if self._yellow_solid_hold_steps > 0:
+                self._yellow_solid_hold_steps -= 1
+            if self._yellow_solid_hold_steps <= 0:
+                self._yellow_solid_active  = False
+                self._yellow_road_limit    = None
+                self._yellow_d_line        = None
+                self._yellow_line_type     = None
+                self._yellow_blocks_left   = False
             return
 
         self._yellow_line_type = yellow_result.line_type
         self._yellow_d_line    = yellow_result.d_yellow_line_m
 
         if yellow_result.line_type == LineType.SOLID:
-            # --- SOLID: Kích hoạt giới hạn biên thích ứng ---
+            # --- SOLID: Kích hoạt giới hạn biên thích ứng và nạp bộ đếm giữ trạng thái ---
             self._yellow_solid_active = True
+            self._yellow_solid_hold_steps = 12  # Giữ ổn định ~0.6s nếu camera/cảm biến bị khuất tạm thời
 
             if yellow_result.road_max_m is not None:
                 # road_max_m mang giá trị giới hạn biên trái road_min (ví dụ: -0.40m)
@@ -819,17 +850,13 @@ class LinearizedMpcController:
             self._yellow_blocks_left = True
 
         elif yellow_result.line_type == LineType.DASHED:
-            # --- DASHED: Cho phép vượt vạch bình thường ---
-            self._yellow_solid_active  = False
-            self._yellow_road_limit    = None
-            self._yellow_blocks_left   = False
+            # --- DASHED: Giảm nhanh bộ đếm trễ để cho phép vượt vạch khi sang đoạn vạch đứt thực sự ---
+            self._yellow_solid_hold_steps = max(0, self._yellow_solid_hold_steps - 4)
+            if self._yellow_solid_hold_steps <= 0:
+                self._yellow_solid_active  = False
+                self._yellow_road_limit    = None
+                self._yellow_blocks_left   = False
 
-        else:
-            # NONE
-            self._yellow_solid_active  = False
-            self._yellow_road_limit    = None
-            self._yellow_d_line        = None
-            self._yellow_blocks_left   = False
     def solve_qp_iteration(self, x_init, x_ref, y_ref, theta_ref, v_ref, obstacles=None, is_roadblock=False,
                            x_ref_orig=None, y_ref_orig=None, theta_ref_orig=None):
         """
@@ -862,6 +889,8 @@ class LinearizedMpcController:
         else:
             min_v = min(float(x_init[3]), 1.5)
 
+        qp_road_min, qp_road_max, is_yellow_solid = self.get_legal_corridor_bounds()
+
         for k in range(self.horizon):
             x_bar_k = self.x_nom[:, k]
             u_bar_k = self.u_nom[:, k]
@@ -880,27 +909,16 @@ class LinearizedMpcController:
             opti.set_initial(X[:, k], x_bar_k)
             opti.set_initial(U[:, k], u_bar_k)
 
-            # Ràng buộc giữ tâm xe nằm trong hành lang mặt đường với biên thích ứng
-            # Kịch bản B (Vạch Liền SOLID): biên trái / phải được thu hẹp bởi Yellow Line Detector
+            # Ràng buộc giữ tâm xe nằm trong Hành lang Pháp lý Động [qp_road_min, qp_road_max]
             if x_ref_orig is not None and y_ref_orig is not None and theta_ref_orig is not None:
                 nx_r = -math.sin(float(theta_ref_orig[k]))
                 ny_r = math.cos(float(theta_ref_orig[k]))
                 d_lat_k = (X[0, k] - float(x_ref_orig[k])) * nx_r + (X[1, k] - float(y_ref_orig[k])) * ny_r
 
-                # Tính biên QP thích ứng theo ràng buộc vạch vàng SOLID:
-                # Vạch SOLID bên TRÁI (d < 0) → thắt biên TRÁI qp_road_min >= lim (ví dụ: >= -0.40m)
-                if self._yellow_solid_active and self._yellow_road_limit is not None:
-                    lim = float(self._yellow_road_limit)
-                    qp_road_min = max(-DEFAULT_ROAD_HALF_WIDTH_M, lim)
-                    qp_road_max =  DEFAULT_ROAD_HALF_WIDTH_M
-                else:
-                    qp_road_min = -DEFAULT_ROAD_HALF_WIDTH_M
-                    qp_road_max =  DEFAULT_ROAD_HALF_WIDTH_M
-
                 opti.subject_to(d_lat_k <= qp_road_max + eps_road[k])
                 opti.subject_to(d_lat_k >= qp_road_min - eps_road[k])
-                # Khi vach SOLID: phạt nặng biến bù để xe không vi phạm vạch nét liền mà vẫn đảm bảo solver hội tụ
-                if self._yellow_solid_active:
+                # Khi vạch SOLID: phạt nặng biến bù để xe không vi phạm vạch nét liền mà vẫn đảm bảo solver luôn hội tụ
+                if is_yellow_solid:
                     cost += 500000.0 * (eps_road[k] ** 2) + 50000.0 * eps_road[k]
                 else:
                     cost += 8000.0 * (eps_road[k] ** 2) + 800.0 * eps_road[k]
@@ -1001,11 +1019,16 @@ class LinearizedMpcController:
                             else:
                                 pass_sign = -1.0 if obs_d_center > 0.25 else 1.0
 
+                            # Khi có vạch vàng SOLID: nếu đi bên trái vật cản sẽ ép tâm xe vượt quá qp_road_min,
+                            # bắt buộc phải đặt siêu phẳng đẩy sang bên PHẢI vật cản để không bao giờ xung đột với vạch vàng
+                            if is_yellow_solid and pass_sign < 0.0 and (d_min_o - r_safe) < (qp_road_min - 0.05):
+                                pass_sign = 1.0
+
                             if pass_sign > 0.0:
-                                # Né về phía bên PHẢI vật cản (d > d_max_o + r_safe)
+                                # Né về phía bên PHẢI vật cản (d >= d_max_o + r_safe)
                                 opti.subject_to(d_lat_k + eps_slack[m, k] >= d_max_o + r_safe)
                             else:
-                                # Né về phía bên TRÁI vật cản (d < d_min_o - r_safe)
+                                # Đi bên TRÁI vật cản (d <= d_min_o - r_safe)
                                 opti.subject_to(-d_lat_k + eps_slack[m, k] >= -d_min_o + r_safe)
 
                             cost += MPC_W_SLACK * (eps_slack[m, k] ** 2) + MPC_W_SLACK_LINEAR * eps_slack[m, k]
@@ -1017,7 +1040,7 @@ class LinearizedMpcController:
             x_opt = np.array(sol.value(X), dtype=float)
             u_opt = np.array(sol.value(U), dtype=float)
             cost_opt = float(sol.value(cost))
-            if self._yellow_solid_active:
+            if is_yellow_solid:
                 eps_vals = np.array(sol.value(eps_road), dtype=float).flatten()
                 self._last_max_eps_road = float(np.max(eps_vals[2:])) if len(eps_vals) > 2 else float(np.max(eps_vals))
             else:
@@ -1026,7 +1049,7 @@ class LinearizedMpcController:
             x_opt = np.array(opti.debug.value(X), dtype=float)
             u_opt = np.array(opti.debug.value(U), dtype=float)
             cost_opt = float(opti.debug.value(cost))
-            if self._yellow_solid_active:
+            if is_yellow_solid:
                 eps_vals = np.array(opti.debug.value(eps_road), dtype=float).flatten()
                 self._last_max_eps_road = float(np.max(eps_vals[2:])) if len(eps_vals) > 2 else float(np.max(eps_vals))
             else:
@@ -1091,18 +1114,29 @@ class LinearizedMpcController:
         self.y_ref_mod = y_ref_mod
 
         r_clear_obs = EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M
+        road_min, _, is_yellow_solid = self.get_legal_corridor_bounds()
         all_obs = []
+        seen_ids = set()
         if self.active_obstacle is not None:
             all_obs.append(self.active_obstacle)
+            if self.active_obstacle.get('id') is not None:
+                seen_ids.add(self.active_obstacle.get('id'))
         if detected_obstacles:
             for obs in detected_obstacles:
-                if self.active_obstacle is None or obs.get('id') != self.active_obstacle.get('id'):
+                oid = obs.get('id')
+                if oid not in seen_ids:
+                    if oid in self.active_chain:
+                        all_obs.append(self.active_chain[oid])
+                        seen_ids.add(oid)
+                        continue
                     # Bỏ qua vật cản nằm hoàn toàn ở làn ngược chiều bên kia vạch vàng SOLID
-                    if self._yellow_solid_active and self._yellow_blocks_left and self._yellow_road_limit is not None:
+                    if is_yellow_solid:
                         _, _, _, d_max_o = self.compute_obstacle_frenet_bounds(obs)
-                        if (d_max_o + r_clear_obs) <= (float(self._yellow_road_limit) + 0.05):
+                        if (d_max_o + r_clear_obs) <= (road_min + 0.05):
                             continue
                     all_obs.append(obs)
+                    if oid is not None:
+                        seen_ids.add(oid)
 
         # Xử lý Roadblock Emergency Stop (Giữ nguyên quỹ đạo làn đang né x_ref_mod, y_ref_mod và phanh dừng trước vật cản chặn làn)
         if self.is_roadblock and self.roadblock_barrier_dist is not None:
@@ -1168,26 +1202,30 @@ class LinearizedMpcController:
             steer_rad = float(u_opt[0, 0])
             acc_m_s2 = float(u_opt[1, 0])
 
-            # NẾU QUỸ ĐẠO MPC BẮT BUỘC PHẢI QUA VẠCH VÀNG NÉT LIỀN ĐƠN/ĐÔI:
-            # Chỉ kích hoạt dừng nếu có vật cản đang ép quỹ đạo dự đoán đi sâu qua giới hạn (< lim - 0.25m, tức sát vạch vàng < 10cm)
-            # VÀ đang tiếp tục lệch thêm sang trái (không khóa nhầm khi xe đang trả lái về tim đường).
-            if self._yellow_solid_active and self.active_obstacle is not None:
-                is_crossing_yellow = False
-                if self.x_nom is not None and self._yellow_road_limit is not None:
+            # VAN MỘT CHIỀU BẢO VỆ VẠCH VÀNG TRONG DỰ BÁO MPC:
+            # Chỉ kích hoạt phanh dừng nếu có vật cản PHÍA TRƯỚC đang ép xe đi sang TRÁI (side_sign <= 0)
+            # cắt sâu qua vạch vàng nét liền (< road_min - 0.25m, tức sát vạch < 10cm) VÀ tiếp tục lao sang trái.
+            # Tuyệt đối KHÔNG khóa phanh khi xe đang né PHẢI (side_sign > 0) hoặc đang trong pha trả lái về tim làn.
+            if is_yellow_solid and self.active_obstacle is not None:
+                s_ego_now, _, _, _, _ = self.project_to_frenet(float(x_init[0]), float(x_init[1]), hint_idx=self.current_traj_idx)
+                obs_s_front = float(self.active_obstacle.get('group_s_front', self.active_obstacle.get('s_front', -1e9)))
+                obs_side = float(self.active_obstacle.get('side_sign', 1.0))
+                if obs_s_front >= s_ego_now and obs_side <= 0.0 and self.x_nom is not None:
+                    is_crossing_yellow = False
                     _, d_pred_0, _, _, _ = self.project_to_frenet(float(self.x_nom[0, 0]), float(self.x_nom[1, 0]))
                     for k in range(4, min(self.horizon + 1, self.x_nom.shape[1])):
                         _, d_pred_k, _, _, _ = self.project_to_frenet(float(self.x_nom[0, k]), float(self.x_nom[1, k]))
-                        if d_pred_k < (self._yellow_road_limit - 0.25) and d_pred_k < (d_pred_0 - 0.05):
+                        if d_pred_k < (road_min - 0.25) and d_pred_k < (d_pred_0 - 0.05):
                             is_crossing_yellow = True
                             break
 
-                if is_crossing_yellow:
-                    self.is_roadblock = True
-                    self.roadblock_reason = (
-                        f"Quỹ đạo dự đoán MPC phải đi qua vạch vàng nét liền. "
-                        f"Kích hoạt phanh dừng an toàn trước vạch vàng!"
-                    )
-                    return max(0.0, steer_rad), -ROADBLOCK_DECELERATION_M_S_2
+                    if is_crossing_yellow:
+                        self.is_roadblock = True
+                        self.roadblock_reason = (
+                            f"Quỹ đạo dự đoán MPC phải đi qua vạch vàng nét liền. "
+                            f"Kích hoạt phanh dừng an toàn trước vạch vàng!"
+                        )
+                        return max(0.0, steer_rad), -ROADBLOCK_DECELERATION_M_S_2
 
             self.u_prev = np.array([steer_rad, acc_m_s2])
 

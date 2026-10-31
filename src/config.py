@@ -134,7 +134,7 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 OBSTACLE_CAUTION_SPEED_MS = 6.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~18.0 km/h - lướt êm, thoát nhanh, không quá chậm)
 OBSTACLE_SLOWDOWN_DISTANCE_M = 15.0   # Khoảng cách bắt đầu giảm tốc êm (m)
 OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 2.0  # Hành lang khoảng cách lệch ngang tối đa so với tim đường (|d_lat| <= 2.0m) để kích hoạt né (bỏ qua xe làn bên cạnh)
-OBSTACLE_PREFER_BYPASS_SIDE = 'right'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
+OBSTACLE_PREFER_BYPASS_SIDE = 'left'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
 
 # ==============================================================================
 # --- CẤU HÌNH 2 CHẾ ĐỘ ĐIỀU KHIỂN & PHANH GẤP VÙNG NGUY HIỂM VA CHẠM ---

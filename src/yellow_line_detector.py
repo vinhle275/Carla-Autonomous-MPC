@@ -148,7 +148,13 @@ class RealtimeYellowLineDetector:
     # API CÔNG KHAI
     # ------------------------------------------------------------------
 
-    def detect(self, rgb_frame: Optional[np.ndarray] = None, ego_vehicle=None, carla_map=None) -> YellowLineResult:
+    def detect(
+        self,
+        rgb_frame: Optional[np.ndarray] = None,
+        ego_vehicle=None,
+        carla_map=None,
+        ref_xy: Optional[Tuple[float, float]] = None
+    ) -> YellowLineResult:
         """
         Nhận diện vạch vàng thời gian thực (Camera RGB + CARLA Map Waypoint Ground Truth).
         Tối ưu tuyệt đối cho vạch đôi nét liền màu vàng (Double Solid Yellow Line) trong CARLA.
@@ -157,6 +163,8 @@ class RealtimeYellowLineDetector:
             rgb_frame: Ảnh RGB shape (H, W, 3) hoặc None.
             ego_vehicle: Actor xe Ego trong CARLA (tùy chọn để lấy vị trí chính xác).
             carla_map: Bản đồ CARLA (tùy chọn để truy vấn vạch kẻ OpenDRIVE).
+            ref_xy: Tọa độ (x_ref, y_ref) của quỹ đạo tham chiếu tại vị trí hiện tại (giữ cố định
+                    làn gốc ngay cả khi xe đang lách sang làn phải để né vật cản).
 
         Returns:
             YellowLineResult chứa trạng thái vạch vàng và giới hạn hành lang lái xe.
@@ -183,12 +191,30 @@ class RealtimeYellowLineDetector:
                 result.debug_bev = bev
 
         # HỖ TRỢ BẢO ĐẢM AN TOÀN TUYỆT ĐỐI VỚI CARLA MAP GROUND TRUTH:
-        # Nhận diện vạch đôi nét liền màu vàng (SolidSolid / Solid) bên trái xe
+        # Nhận diện vạch đôi nét liền màu vàng (SolidSolid / Solid) hoặc nét đứt bên trái làn tham chiếu
         if ego_vehicle is not None and carla_map is not None:
             try:
                 import carla
                 ego_loc = ego_vehicle.get_location()
-                wp = carla_map.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+                if ref_xy is not None:
+                    query_loc = carla.Location(x=float(ref_xy[0]), y=float(ref_xy[1]), z=ego_loc.z)
+                else:
+                    query_loc = ego_loc
+
+                wp = carla_map.get_waypoint(query_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+
+                # Nếu không truyền ref_xy và xe đang tạm lách sang làn bên phải để né vật cản,
+                # kiểm tra làn cùng chiều bên trái để không bị mất dấu vạch vàng tim đường
+                if wp is not None and hasattr(wp, 'left_lane_marking'):
+                    if wp.left_lane_marking.color != carla.LaneMarkingColor.Yellow and hasattr(wp, 'get_left_lane'):
+                        wp_left = wp.get_left_lane()
+                        if (wp_left is not None
+                                and wp_left.lane_type == carla.LaneType.Driving
+                                and (wp_left.lane_id * wp.lane_id > 0)
+                                and hasattr(wp_left, 'left_lane_marking')
+                                and wp_left.left_lane_marking.color == carla.LaneMarkingColor.Yellow):
+                            wp = wp_left
+
                 if wp is not None and hasattr(wp, 'left_lane_marking'):
                     lm = wp.left_lane_marking
                     is_yellow = (lm.color == carla.LaneMarkingColor.Yellow)
@@ -197,26 +223,32 @@ class RealtimeYellowLineDetector:
                         carla.LaneMarkingType.SolidSolid,
                         carla.LaneMarkingType.SolidBroken
                     )
+                    is_broken = lm.type in (
+                        carla.LaneMarkingType.Broken,
+                        carla.LaneMarkingType.BrokenSolid,
+                        carla.LaneMarkingType.BrokenBroken
+                    )
+
+                    wp_loc = wp.transform.location
+                    wp_yaw = math.radians(wp.transform.rotation.yaw)
+                    # Trong hệ CARLA/Unreal: nx = -sin(yaw), ny = cos(yaw) chỉ sang PHẢI làn đường
+                    nx = -math.sin(wp_yaw)
+                    ny = math.cos(wp_yaw)
+
+                    # Độ lệch ngang của xe so với tim làn tham chiếu (d_lat_ego):
+                    # d_lat_ego > 0: xe lệch sang PHẢI (xa vạch vàng)
+                    # d_lat_ego < 0: xe lệch sang TRÁI (tiến sát vạch vàng)
+                    d_lat_ego = nx * (ego_loc.x - wp_loc.x) + ny * (ego_loc.y - wp_loc.y)
+
+                    # Vạch vàng bên trái nằm ở d_yellow = -d_lane_half (thường là -1.75m)
+                    d_lane_half = float(wp.lane_width / 2.0)
+                    d_yellow_line = -d_lane_half
+
+                    # Khoảng cách thực tế thời gian thực từ tâm xe tới vạch vàng:
+                    # d_actual = d_lat_ego - d_yellow_line = d_lat_ego + d_lane_half
+                    d_actual_to_yellow = max(0.0, d_lat_ego + d_lane_half)
+
                     if is_yellow and is_solid:
-                        wp_loc = wp.transform.location
-                        wp_yaw = math.radians(wp.transform.rotation.yaw)
-                        # Trong hệ CARLA/Unreal: nx = -sin(yaw), ny = cos(yaw) chỉ sang PHẢI làn đường
-                        nx = -math.sin(wp_yaw)
-                        ny = math.cos(wp_yaw)
-
-                        # Độ lệch ngang của xe so với tim làn (d_lat_ego):
-                        # d_lat_ego > 0: xe lệch sang PHẢI (xa vạch vàng)
-                        # d_lat_ego < 0: xe lệch sang TRÁI (tiến sát vạch vàng)
-                        d_lat_ego = nx * (ego_loc.x - wp_loc.x) + ny * (ego_loc.y - wp_loc.y)
-
-                        # Vạch vàng bên trái nằm ở d_yellow = -d_lane_half (thường là -1.75m)
-                        d_lane_half = float(wp.lane_width / 2.0)
-                        d_yellow_line = -d_lane_half
-
-                        # Khoảng cách thực tế thời gian thực từ tâm xe tới vạch vàng:
-                        # d_actual = d_lat_ego - d_yellow_line = d_lat_ego + d_lane_half
-                        d_actual_to_yellow = max(0.0, d_lat_ego + d_lane_half)
-
                         result.line_type = LineType.SOLID
                         result.d_yellow_line_m = float(d_actual_to_yellow)
 
@@ -225,6 +257,15 @@ class RealtimeYellowLineDetector:
                         # road_min = d_yellow_line + r_clear = -1.75 + 1.35 = -0.40m
                         r_clear = EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M
                         result.road_max_m = d_yellow_line + r_clear   # giá trị âm (ví dụ: -0.40m)
+                    elif is_yellow and is_broken:
+                        result.line_type = LineType.DASHED
+                        result.d_yellow_line_m = float(d_actual_to_yellow)
+                        result.road_max_m = None
+                    else:
+                        # Không có vạch vàng bên trái làn đường -> xóa tránh nhiễu màu vàng từ marker vật cản
+                        result.line_type = LineType.NONE
+                        result.d_yellow_line_m = None
+                        result.road_max_m = None
             except Exception:
                 pass
 
@@ -258,7 +299,14 @@ class RealtimeYellowLineDetector:
         # Lọc dải màu vàng — cv2.inRange chạy C++ SIMD (vectorized tự động)
         mask = cv2.inRange(hsv, self._lower_yellow, self._upper_yellow)  # uint8
 
-        return mask  # Shape (H/2, W)
+        # Chuẩn hóa kích thước mask ROI về đúng không gian tham chiếu của ma trận IPM (1000 × 450)
+        # khi nhận ảnh trực tiếp từ Front View (Hood-Cam 480 × 300)
+        target_roi_w = CAM_IMAGE_WIDTH
+        target_roi_h = CAM_IMAGE_HEIGHT // 2
+        if mask.shape[1] != target_roi_w or mask.shape[0] != target_roi_h:
+            mask = cv2.resize(mask, (target_roi_w, target_roi_h), interpolation=cv2.INTER_NEAREST)
+
+        return mask  # Shape (CAM_IMAGE_HEIGHT/2, CAM_IMAGE_WIDTH)
 
     # ------------------------------------------------------------------
     # BƯỚC 2: IPM matrix
@@ -305,21 +353,19 @@ class RealtimeYellowLineDetector:
         half_h = H // 2
         histogram = np.sum(bev[half_h:, :], axis=0)    # shape (W,)
 
-        # Tìm peak trong vùng bên trái (giả định vạch vàng bên trái làn xe)
+        # Tìm peak trong vùng bên trái (vạch vàng phân làn ngược chiều nằm bên trái làn xe)
         left_half  = histogram[:W // 2]
         right_half = histogram[W // 2:]
 
         left_base  = int(np.argmax(left_half))
         right_base = int(np.argmax(right_half)) + W // 2
 
-        # Chọn phía có histogram mạnh hơn làm gốc chính (vạch vàng thường bên trái)
-        if histogram[left_base] >= histogram[right_base]:
+        # Ưu tiên nửa trái BEV để tránh nhầm lẫn với marker/vật cản màu vàng cam bên phải làn
+        if histogram[left_base] >= self._min_pix * 2:
             base_x = left_base
-        else:
+        elif histogram[right_base] >= self._min_pix * 2:
             base_x = right_base
-
-        # Nếu peak quá yếu → không có vạch
-        if histogram[base_x] < self._min_pix * 2:
+        else:
             result.line_type = LineType.NONE
             return result
 
@@ -411,26 +457,19 @@ class RealtimeYellowLineDetector:
                     result.poly_coeffs = None
 
         # ----------------------------------------------------------------
-        # 3e. Tính khoảng cách ngang Frenet d_yellow_line (m)
+        # 3e. Tính khoảng cách ngang thực tế d_yellow_line_m (m, >= 0)
         # ----------------------------------------------------------------
         d_m = self._compute_frenet_offset(result.poly_coeffs, bev.shape)
         result.d_yellow_line_m = d_m
 
         # ----------------------------------------------------------------
-        # 3f. Tính road_max_m cho vạch SOLID (ràng buộc MPC)
+        # 3f. Tính road_max_m (giới hạn biên trái road_min cho vạch SOLID trong MPC)
         # ----------------------------------------------------------------
         if line_type == LineType.SOLID and d_m is not None:
             r_clearance = EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M
-            # HỆ TỌA ĐỘ FRENET: d > 0 là BÊN TRÁI (vạch đôi vàng nét liền), d < 0 là BÊN PHẢI.
-            if d_m > 0:
-                # Vạch SOLID bên TRÁI xe (d_m > 0):
-                # Ràng buộc sườn xe bên trái không đè vạch: d_ego <= d_m - r_clearance
-                computed_limit = d_m - r_clearance    # vd: 1.75 - 1.30 = +0.45m
-                result.road_max_m = max(0.20, computed_limit)
-            else:
-                # Vạch SOLID bên PHẢI xe (d_m < 0):
-                computed_limit = d_m + r_clearance    # vd: -1.75 + 1.30 = -0.45m
-                result.road_max_m = min(-0.20, computed_limit)
+            # HỆ TỌA ĐỘ CARLA FRENET: d < 0 là BÊN TRÁI (vạch đôi vàng nét liền ở d = -1.75m),
+            # d > 0 là BÊN PHẢI. Giới hạn biên trái của tâm xe: road_min = -1.75 + r_clearance = -0.40m
+            result.road_max_m = -1.75 + r_clearance
 
         return result
 
@@ -444,19 +483,18 @@ class RealtimeYellowLineDetector:
         bev_shape: Tuple[int, int]
     ) -> Optional[float]:
         """
-        Tính khoảng cách ngang (m) từ tâm xe (đáy ảnh BEV) tới vạch vàng.
+        Tính khoảng cách ngang thực tế (m, >= 0) từ tâm xe (đáy ảnh BEV) tới vạch vàng bên trái.
 
         Trong BEV:
           • y = H-1 tương ứng với vị trí ngay trước đầu xe.
-          • Trục x ngang: x < W/2 → vạch bên trái → d < 0.
-                          x > W/2 → vạch bên phải → d > 0.
+          • Trục x ngang: x < W/2 → vạch nằm bên trái tâm xe.
 
         Args:
             poly_coeffs : [a, b, c] từ np.polyfit(y, x, 2), hoặc None.
             bev_shape   : (H, W) của ảnh BEV.
 
         Returns:
-            d_m: float (m) hoặc None nếu không tính được.
+            d_m: float (m, >= 0) hoặc None nếu không tính được.
         """
         if poly_coeffs is None:
             return None
@@ -471,16 +509,13 @@ class RealtimeYellowLineDetector:
         # Tâm xe ở cột W/2 trong BEV
         x_ego_px = float(W) / 2.0
 
-        # Sai lệch pixels → mét (vạch bên trái xe => dx_px <= 0)
-        # HỆ TỌA ĐỘ FRENET: N hướng SANG TRÁI, nên d > 0 là BÊN TRÁI, d < 0 là BÊN PHẢI.
+        # Khoảng cách ngang từ tâm xe tới vạch vàng bên trái (luôn >= 0m, đồng nhất với Ground Truth)
         dx_px = x_line_px - x_ego_px
-        dist_m = abs(dx_px) * BEV_METERS_PER_PIXEL_X
-        if dx_px <= 0:
-            d_m = dist_m      # Vạch bên TRÁI xe: d > 0 trong Frenet
-        else:
-            d_m = -dist_m     # Vạch bên PHẢI xe: d < 0 trong Frenet
-
-        return float(d_m)
+        if dx_px > 40.0:
+            # Nếu vạch nằm hẳn sang bên phải mũi xe trong BEV -> không phải vạch vàng tim đường bên trái
+            return None
+        dist_m = max(0.0, -dx_px * BEV_METERS_PER_PIXEL_X)
+        return float(dist_m)
 
     @staticmethod
     def _count_max_consecutive_false(flags: list[bool]) -> int:

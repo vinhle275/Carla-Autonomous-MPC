@@ -149,8 +149,17 @@ def main():
         )
         print("[YELLOW LINE] Đã khởi tạo RealtimeYellowLineDetector (HSV+IPM+Sliding Window + CARLA Map Ground Truth).")
 
-    # Biến lưu frame RGB mới nhất từ camera_viewer (chia sẻ qua callback)
-    _latest_rgb_frame = [None]   # List để cho phép gán trong closure
+    # Tính mảng chiều dài cung tích lũy s_traj (m) dọc theo quỹ đạo để hiển thị tiến độ trên Cockpit Dashboard
+    dx_traj = np.diff(x_traj)
+    dy_traj = np.diff(y_traj)
+    s_traj = np.concatenate(([0.0], np.cumsum(np.hypot(dx_traj, dy_traj))))
+    s_total_m = float(s_traj[-1]) if len(s_traj) > 0 else 0.0
+
+    # Biến trạng thái tính gia tốc tức thời a_k và độ giật Jerk j_k (lọc thông thấp EMA alpha = 0.35)
+    prev_v0 = None
+    prev_accel = 0.0
+    jerk_filtered = 0.0
+    jerk_ema_alpha = 0.35
 
     current_idx = 0
     print("\n--- BẮT ĐẦU VÒNG LẶP ĐIỀU KHIỂN MPC BÁM ĐƯỜNG & NÉ VẬT CẢN ---")
@@ -166,31 +175,19 @@ def main():
             # Lấy trạng thái hiện tại của xe từ CARLA
             x0, y0, theta0_raw, v0 = carla.get_main_ego_vehicle_state()
 
+            # Tính toán gia tốc tức thời a_ego (m/s^2) và độ giật dọc Jerk j_ego (m/s^3) có lọc thông thấp EMA
+            if prev_v0 is None:
+                accel_ego = 0.0
+                jerk_raw = 0.0
+            else:
+                accel_ego = (v0 - prev_v0) / max(dt, 1e-3)
+                jerk_raw = (accel_ego - prev_accel) / max(dt, 1e-3)
+            jerk_filtered = jerk_ema_alpha * jerk_raw + (1.0 - jerk_ema_alpha) * jerk_filtered
+            prev_v0 = v0
+            prev_accel = accel_ego
+
             # Quét cảm biến nhận thức vật cản theo thời gian thực (Perception)
             detected_obstacles = obstacle_detector.scan(draw_debug=True, life_time=dt * 2)
-
-            # --- NHẬN DIỆN VẠCH VÀNG (Yellow Line Perception) ---
-            yellow_result = None
-            if yellow_detector is not None:
-                rgb_frame = None
-                if camera_viewer is not None and camera_viewer.surface is not None:
-                    try:
-                        import pygame
-                        raw_surf = camera_viewer.surface
-                        rgb_array = pygame.surfarray.array3d(raw_surf)
-                        rgb_frame = np.transpose(rgb_array, (1, 0, 2))
-                    except Exception:
-                        pass
-
-                try:
-                    yellow_result = yellow_detector.detect(
-                        rgb_frame, ego_vehicle=carla.ego_vehicle, carla_map=carla.carla_map
-                    )
-                    # Cập nhật ràng buộc vạch vàng vào MPC controller
-                    if USE_LINEARIZED_QP_MPC and hasattr(mpc_controller, 'update_yellow_line_constraint'):
-                        mpc_controller.update_yellow_line_constraint(yellow_result)
-                except Exception as _yl_err:
-                    pass
 
             # Cập nhật chỉ số waypoint gần nhất
             current_idx = update_reference_point(x0, y0, current_idx, x_traj, y_traj)
@@ -200,6 +197,35 @@ def main():
 
             # Khắc phục lỗi nhảy góc +-pi: Chuẩn hóa theta0 trùng nhánh góc liên tục với theta_ref[0]
             theta0 = theta_ref[0] + normalize_angle(theta0_raw - theta_ref[0])
+
+            # --- NHẬN DIỆN VẠCH VÀNG (Yellow Line Perception - lấy trực tiếp từ Front Hood-Cam) ---
+            yellow_result = None
+            if yellow_detector is not None:
+                rgb_frame = None
+                if camera_viewer is not None:
+                    if hasattr(camera_viewer, 'get_front_frame'):
+                        rgb_frame = camera_viewer.get_front_frame()
+                    elif camera_viewer.surface is not None:
+                        try:
+                            import pygame
+                            raw_surf = camera_viewer.surface
+                            rgb_array = pygame.surfarray.array3d(raw_surf)
+                            rgb_frame = np.transpose(rgb_array, (1, 0, 2))
+                        except Exception:
+                            pass
+
+                try:
+                    yellow_result = yellow_detector.detect(
+                        rgb_frame,
+                        ego_vehicle=carla.ego_vehicle,
+                        carla_map=carla.carla_map,
+                        ref_xy=(float(x_ref[0]), float(y_ref[0])),
+                    )
+                    # Cập nhật ràng buộc vạch vàng vào MPC controller
+                    if USE_LINEARIZED_QP_MPC and hasattr(mpc_controller, 'update_yellow_line_constraint'):
+                        mpc_controller.update_yellow_line_constraint(yellow_result)
+                except Exception as _yl_err:
+                    pass
 
             # Ghi Log đầu vào
             logger.log_controller_input(x0, y0, v0, theta0, x_ref[0], y_ref[0], v_ref[0], theta_ref[0])
@@ -273,16 +299,22 @@ def main():
                 )
 
             # BẢO VỆ TUYỆT ĐỐI KHÔNG CHẠM VẠCH VÀNG:
-            # Nếu khoảng cách từ tâm xe tới vạch vàng <= 1.15m (mép sườn xe cách vạch vàng <= 15cm)
-            # và xe đang chuyển động: Lập tức phanh dừng an toàn không để xe chạm vạch!
+            # Nếu khoảng cách từ tâm xe tới vạch vàng <= 1.15m (mép sườn xe cách vạch vàng <= 15cm):
+            # - Nếu bị roadblock hoặc xe đang di chuyển lệch tiếp sang trái sát vạch (<= 1.05m và v_lat_ego < -0.02):
+            #   Phanh giảm tốc/dừng an toàn; khi đã hãm lại hoặc không có roadblock thì mớm lái sang phải để thoát kẹt về tâm làn.
             if (yellow_result is not None
                     and yellow_result.line_type == LineType.SOLID
                     and yellow_result.d_yellow_line_m is not None
                     and yellow_result.d_yellow_line_m <= 1.15):
-                throttle = 0.0
-                brake = 1.0
-                steer = 0.0
-                print(f"\n[DỪNG AN TOÀN TRƯỚC VẠCH VÀNG] Cự ly tới vạch vàng chỉ còn {yellow_result.d_yellow_line_m:.2f}m (mép xe <= 15cm)! Phanh dừng an toàn!")
+                v_lat_ego = v0 * np.sin(theta0 - theta_ref[0])
+                is_rb = hasattr(mpc_controller, 'is_roadblock') and mpc_controller.is_roadblock
+                if is_rb or (yellow_result.d_yellow_line_m <= 1.05 and v_lat_ego < -0.02 and v0 > 0.3):
+                    throttle = 0.0
+                    brake = 1.0
+                    steer = max(0.08, steer)
+                    print(f"\n[DỪNG AN TOÀN TRƯỚC VẠCH VÀNG] Cự ly tới vạch vàng chỉ còn {yellow_result.d_yellow_line_m:.2f}m (mép xe <= 15cm)! Phanh an toàn!")
+                else:
+                    steer = max(0.08, steer)
 
             logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)
@@ -308,15 +340,20 @@ def main():
                 if yellow_result is not None:
                     yt = yellow_result.line_type.value
                     yd = f'{yellow_result.d_yellow_line_m:.2f}m' if yellow_result.d_yellow_line_m is not None else 'N/A'
-                    yellow_hud = f'{yt}|d={yd}|{yellow_result.detect_time_ms:.1f}ms'
+                    yellow_hud = f'{yt} | d={yd} | {yellow_result.detect_time_ms:.1f}ms'
+                s_ego_curr = float(s_traj[min(current_idx, len(s_traj) - 1)]) if len(s_traj) > 0 else 0.0
                 hud_info = {
                     'speed_kmh': v0 * 3.6,
                     'target_kmh': v_ref[0] * 3.6,
                     'steer_deg': float(np.rad2deg(wheel_angle_rad)),
+                    'accel_ms2': float(accel_ego),
+                    'jerk_ms3': float(jerk_filtered),
                     'bypass_text': bypass_txt,
                     'obs_count': len(detected_obstacles),
                     'current_idx': current_idx,
                     'total_idx': total_waypoints,
+                    's_ego_m': s_ego_curr,
+                    's_total_m': s_total_m,
                     'is_emergency': is_emergency,
                     'yellow_line': yellow_hud,
                 }

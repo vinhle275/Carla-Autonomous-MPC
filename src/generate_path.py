@@ -109,10 +109,9 @@ def main():
     # ---------------------------------------------------------------
     save_waypoints_to_csv(trajectory, TRAJECTORY_CSV_PATH)
     save_obstacles_to_csv(obstacles, OBSTACLES_CSV_PATH)
-    if moving_obstacles:
-        save_moving_obstacles_to_csv(moving_obstacles, MOVING_OBSTACLES_CSV_PATH)
-    else:
-        print("[THONG BAO] Khong co vat can di dong nao duoc chon. Bo qua luu file.")
+    save_moving_obstacles_to_csv(moving_obstacles, MOVING_OBSTACLES_CSV_PATH)
+    if not moving_obstacles:
+        print("[THONG BAO] Khong co vat can di dong nao duoc chon. Da xoa du lieu cu trong file CSV.")
 
     # ---------------------------------------------------------------
     # Hien thi 3D tren ban do CARLA

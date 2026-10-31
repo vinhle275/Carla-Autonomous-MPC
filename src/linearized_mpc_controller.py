@@ -362,6 +362,10 @@ class LinearizedMpcController:
         if detected_obstacles:
             for obs in detected_obstacles:
                 s_r, s_f, d_min, d_max = self.compute_obstacle_frenet_bounds(obs)
+                # Khi có vạch vàng SOLID bên trái: bỏ qua các vật cản nằm hoàn toàn ở làn ngược chiều bên kia vạch vàng
+                if self._yellow_solid_active and self._yellow_blocks_left:
+                    if (d_max + r_clearance) <= (road_min + 0.05):
+                        continue
                 if (s_f >= s_ego - 12.0) and (s_r <= s_ego + SENSOR_DETECTION_RANGE_M) and (d_max >= road_min - 1.5) and (d_min <= road_max + 1.5):
                     obs_c = dict(obs)
                     obs_c['s_rear'] = s_r
@@ -373,12 +377,17 @@ class LinearizedMpcController:
                     obs_c['d_lat_road'] = 0.5 * (d_min + d_max)
                     road_obs.append(obs_c)
 
-        # Giải phóng các vật cản mà xe đã hoàn tất toàn bộ đoạn trả làn
+        # Giải phóng các vật cản mà xe đã hoàn tất toàn bộ đoạn trả làn của cả cụm liên thông
+        # hoặc vật cản nằm bên kia vạch vàng nét liền
         to_remove = []
         for obs_id, obs_item in self.active_chain.items():
-            s_ret_done = obs_item['s_front'] + OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M + 1.0
+            grp_front = obs_item.get('group_s_front', obs_item['s_front'])
+            s_ret_done = grp_front + OBSTACLE_HOLD_DISTANCE_M + OBSTACLE_RETURN_RAMP_M + 2.0
             if s_ego > s_ret_done:
                 to_remove.append(obs_id)
+            elif self._yellow_solid_active and self._yellow_blocks_left:
+                if (obs_item.get('d_max', 0.0) + r_clearance) <= (road_min + 0.05):
+                    to_remove.append(obs_id)
         for obs_id in to_remove:
             del self.active_chain[obs_id]
 
@@ -413,7 +422,8 @@ class LinearizedMpcController:
         for obs_item in self.active_chain.values():
             if obs_item.get('A_shift', 0.0) < 0.05 or obs_item.get('side_sign') is None:
                 continue
-            if obs_item['s_front'] + OBSTACLE_HOLD_DISTANCE_M >= s_ego:
+            grp_front = obs_item.get('group_s_front', obs_item['s_front'])
+            if grp_front + OBSTACLE_HOLD_DISTANCE_M >= s_ego:
                 dist_to_lock = (obs_item['s_rear'] - EGO_FRONT_OVERHANG_M) - s_ego
                 if dist_to_lock <= lock_dist:
                     committed_sign = obs_item['side_sign']
@@ -423,8 +433,9 @@ class LinearizedMpcController:
                         prev_s_front = obs_item['s_front']
 
         if committed_sign is None and abs(d_ego) >= 0.65:
-            committed_sign = -1.0 if d_ego < 0 else 1.0
-            committed_d = d_ego
+            if not (self._yellow_solid_active and self._yellow_blocks_left and d_ego < 0):
+                committed_sign = -1.0 if d_ego < 0 else 1.0
+                committed_d = d_ego
 
         # Nếu chưa khóa hướng né, nhìn trước trong cửa sổ 16m kể từ lát cắt đầu tiên để chọn hành lang chung tối ưu
         initial_pref_sign = committed_sign
@@ -452,6 +463,9 @@ class LinearizedMpcController:
             )
             gaps = self.find_free_gaps_in_corridor(sl['blocked'], road_min, road_max)
 
+            # Chỉ kiểm tra Roadblock đối với lát cắt nằm ở phía trước tâm xe (không báo dừng với lát cắt xe đang đi ngang sườn)
+            is_ahead_of_ego = (sl['s_rear'] >= s_ego + 0.5)
+
             # Kiểm tra xem lát cắt này có bị ép phải đi cùng phía curr_sign hay không
             must_keep_side = False
             if curr_sign is not None:
@@ -477,12 +491,12 @@ class LinearizedMpcController:
                         must_keep_side = True
 
             if not gaps:
-                if ENABLE_ROADBLOCK_EMERGENCY_STOP and sl['s_rear'] >= s_ego - 1.0:
+                if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
                     self.roadblock_reason = (
                         f"BÍT KÍN TOÀN BỘ MẶT ĐƯỜNG tại s={sl['s_rear']:.1f}m. "
-                        f"Không còn khe trống nào đủ bề rộng (>= {min_gap_width:.2f}m) trên mặt đường [-{DEFAULT_ROAD_HALF_WIDTH_M:.1f}m, +{DEFAULT_ROAD_HALF_WIDTH_M:.1f}m]."
+                        f"Không còn khe trống nào đủ bề rộng (>= {min_gap_width:.2f}m) trên mặt đường [{road_min:.2f}m, +{road_max:.2f}m]."
                     )
                     blocking_slice = sl
                     break
@@ -491,37 +505,52 @@ class LinearizedMpcController:
             enforce_sign = curr_sign if must_keep_side else None
 
             # --- Kịch bản B2: Vạch SOLID phong tỏa phía né bên trái ---
-            # Vạch nét liền bên TRÁI cấm vượt (d < -0.40m bị chặn hoàn toàn).
-            # Xe chỉ có thể né sang PHẢI (d > 0). Kiểm tra xem lề phải có khe trống an toàn không:
+            # Vạch nét liền bên TRÁI cấm vượt (d < road_min bị chặn hoàn toàn).
+            # Lưu ý: gaps đã được cắt theo [road_min, road_max] (tức g_l >= -0.40m).
             if (self._yellow_solid_active and self._yellow_blocks_left
                     and ENABLE_ROADBLOCK_EMERGENCY_STOP
-                    and sl['s_rear'] >= s_ego - 1.0):
-                # Khe trống bên PHẢI: g_high > 0.5 và độ rộng khe >= 0.8m
-                right_gaps = [(g_l, g_h) for g_l, g_h in gaps if g_h > 0.5 and (g_h - g_l) >= 0.8]
-                if not right_gaps:
-                    # Phía phải không có lối né an toàn VÀ bên trái là vạch vàng nét liền cấm vượt
-                    # => PHONG TỎA ĐƯỜNG (ROADBLOCK) => DỪNG XE AN TOÀN TRƯỚC VẠCH VÀNG / VẬT CẢN!
+                    and is_ahead_of_ego):
+                valid_yellow_gaps = [(g_l, g_h) for g_l, g_h in gaps if (g_h - g_l) >= min_gap_width]
+                blocks_center = any(b_l < 0.05 and b_h > -0.05 for b_l, b_h in sl['blocked'])
+                if blocks_center:
+                    # Vật cản chặn tim đường -> bắt buộc phải có khe trống đủ rộng bên PHẢI (g_h >= 1.2m)
+                    right_bypass_gaps = [
+                        (g_l, g_h) for g_l, g_h in valid_yellow_gaps
+                        if g_h >= 1.20 and (g_h - max(g_l, 0.0)) >= min_gap_width
+                    ]
+                    if not right_bypass_gaps:
+                        self.is_roadblock = True
+                        self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                        d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else "n/a"
+                        self.roadblock_reason = (
+                            f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + LỀ PHẢI BỊ CHẶN tại s={sl["s_rear"]:.1f}m. '
+                            f'Tuyệt đối cấm vượt vạch vàng nét liền; dừng xe an toàn!'
+                        )
+                        blocking_slice = sl
+                        break
+                    else:
+                        enforce_sign = +1.0
+                elif not valid_yellow_gaps:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
                     d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else "n/a"
                     self.roadblock_reason = (
-                        f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + LỀ PHẢI BỊ CHẶN tại s={sl["s_rear"]:.1f}m. '
-                        f'Tuyệt đối cấm vượt vạch vàng nét liền; dừng xe an toàn!'
+                        f'VẠCH VÀNG NÉT LIỀN BÊN TRÁI (d={d_yl_str}) CẤM VƯỢT + HÀNH LANG HẸP tại s={sl["s_rear"]:.1f}m. '
+                        f'Dừng xe an toàn!'
                     )
                     blocking_slice = sl
                     break
-                else:
-                    # Còn lề phải → BẮT BUỘC ÉP XE NÉ SANG PHẢI (enforce_sign = +1.0)
-                    enforce_sign = +1.0
 
             d_target, _ = self.select_optimal_shift_from_gaps(gaps, preferred_sign=curr_sign, enforce_sign=enforce_sign)
+            if d_target is not None and self._yellow_solid_active and self._yellow_blocks_left:
+                d_target = max(d_target, road_min + 0.05)
 
             if d_target is None:
                 # Phía đang né (enforce_sign) đã bị vật cản mới bít kín và không đủ khoảng cách dọc để đảo sang bên kia -> Dừng lại!
-                if ENABLE_ROADBLOCK_EMERGENCY_STOP and sl['s_rear'] >= s_ego - 1.0:
+                if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    side_str = "PHẢI" if enforce_sign > 0 else "TRÁI"
+                    side_str = "PHẢI" if (enforce_sign is not None and enforce_sign > 0) else "TRÁI"
                     self.roadblock_reason = (
                         f"PHONG TỎA ĐƯỜNG (STAGGERED ROADBLOCK) tại s={sl['s_rear']:.1f}m. "
                         f"Vật cản so le bít kín cả 2 làn đường (làn {side_str} bị chặn và khoảng cách dọc không đủ để đảo làn an toàn)."
@@ -563,8 +592,12 @@ class LinearizedMpcController:
                         'd_target': d_target
                     }
                 else:
+                    self.active_chain[oid]['x'] = o['x']
+                    self.active_chain[oid]['y'] = o['y']
                     self.active_chain[oid]['s_rear'] = o['s_rear']
                     self.active_chain[oid]['s_front'] = o['s_front']
+                    self.active_chain[oid]['d_min'] = o['d_min']
+                    self.active_chain[oid]['d_max'] = o['d_max']
                     if (self.active_chain[oid]['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego) > lock_dist:
                         self.active_chain[oid]['side_sign'] = side_sign
                         self.active_chain[oid]['A_shift'] = A_shift
@@ -572,11 +605,19 @@ class LinearizedMpcController:
                     else:
                         locked_sign = self.active_chain[oid]['side_sign']
                         if locked_sign * side_sign > 0:
-                            self.active_chain[oid]['A_shift'] = max(self.active_chain[oid]['A_shift'], A_shift)
-                            self.active_chain[oid]['d_target'] = locked_sign * self.active_chain[oid]['A_shift']
+                            # Chỉ cập nhật tăng nhẹ nếu cần thiết để tránh giật ngang khi đang giữ làn
+                            if A_shift > self.active_chain[oid]['A_shift']:
+                                self.active_chain[oid]['A_shift'] = 0.3 * A_shift + 0.7 * self.active_chain[oid]['A_shift']
+                                self.active_chain[oid]['d_target'] = locked_sign * self.active_chain[oid]['A_shift']
+                        elif self._yellow_solid_active and self._yellow_blocks_left and locked_sign < 0 and side_sign > 0:
+                            # Cưỡng bức đổi từ né trái sang né phải nếu phát hiện vạch vàng SOLID cấm vượt trái
+                            self.active_chain[oid]['side_sign'] = side_sign
+                            self.active_chain[oid]['A_shift'] = A_shift
+                            self.active_chain[oid]['d_target'] = d_target
 
-        # Làm phẳng biên độ dịch giữa các vật cản liên tiếp cùng phía trong active_chain
+        # Hợp nhất các vật cản liên tiếp cùng phía thành các Hành Lang Phẳng Liền Khối (Corridor Groups)
         chain_list = sorted(self.active_chain.values(), key=lambda item: item['s_rear'])
+        corridor_groups = []
         i_start = 0
         while i_start < len(chain_list):
             i_end = i_start
@@ -590,9 +631,20 @@ class LinearizedMpcController:
                     i_end += 1
                 else:
                     break
+            grp_s_rear = chain_list[i_start]['s_rear']
+            grp_s_front = max(chain_list[idx_g]['s_front'] for idx_g in range(i_start, i_end + 1))
             for idx_g in range(i_start, i_end + 1):
                 chain_list[idx_g]['A_shift'] = max_A
                 chain_list[idx_g]['d_target'] = group_sign * max_A
+                chain_list[idx_g]['group_s_rear'] = grp_s_rear
+                chain_list[idx_g]['group_s_front'] = grp_s_front
+            corridor_groups.append({
+                's_rear': grp_s_rear,
+                's_front': grp_s_front,
+                'side_sign': group_sign,
+                'A_shift': max_A,
+                'd_target': group_sign * max_A,
+            })
             i_start = i_end + 1
 
         if not self.active_chain and not self.is_roadblock:
@@ -607,7 +659,7 @@ class LinearizedMpcController:
         else:
             self.active_obstacle = None
 
-        # 5. Tính toán đường bao dịch ngang d_shift_k
+        # 5. Tính toán đường bao dịch ngang d_shift_k trên từng Hành Lang Phẳng Liền Khối (corridor_groups)
         # Đặc biệt: nếu phát hiện Roadblock khi đang ở trong làn né, giữ nguyên độ dịch ngang của làn né
         # xuyên suốt tới qua điểm dừng để xe phanh thẳng mượt ngay trong làn né, tuyệt đối không kéo xe về tim đường đâm vào chuỗi vật cản!
         hold_corridor_d = 0.0
@@ -629,10 +681,10 @@ class LinearizedMpcController:
             max_pos_shift = 0.0
             min_neg_shift = 0.0
 
-            for obs_item in chain_list:
-                w = self.calc_span_obstacle_weight(s_k, obs_item['s_rear'], obs_item['s_front'])
+            for grp in corridor_groups:
+                w = self.calc_span_obstacle_weight(s_k, grp['s_rear'], grp['s_front'])
                 if w > 1e-4:
-                    d_t = obs_item.get('d_target', obs_item['side_sign'] * obs_item['A_shift'])
+                    d_t = grp['d_target']
                     val = w * d_t
                     if val > max_pos_shift:
                         max_pos_shift = val
@@ -650,14 +702,15 @@ class LinearizedMpcController:
             x_ref_mod[k] = x_ref[k] + d_shift_k * nx_k
             y_ref_mod[k] = y_ref[k] + d_shift_k * ny_k
 
-        # 6. Làm mịn góc tiếp tuyến theta_ref_mod
+        # 6. Tính góc tiếp tuyến theta_ref_mod đồng bộ chính xác với hướng đường cong S-Curve
         for k in range(n_ref - 1):
-            dx = x_ref_mod[k + 1] - x_ref_mod[k]
-            dy = y_ref_mod[k + 1] - y_ref_mod[k]
+            k_next = min(n_ref - 1, k + 2)
+            dx = x_ref_mod[k_next] - x_ref_mod[k]
+            dy = y_ref_mod[k_next] - y_ref_mod[k]
             if math.hypot(dx, dy) > 1e-3:
                 th_target = math.atan2(dy, dx)
                 d_th = normalize_angle(th_target - theta_ref[k])
-                theta_ref_mod[k] = theta_ref[k] + 0.75 * d_th
+                theta_ref_mod[k] = theta_ref[k] + 0.90 * d_th
         if n_ref > 1:
             theta_ref_mod[-1] = theta_ref_mod[-2]
 
@@ -692,13 +745,13 @@ class LinearizedMpcController:
         return x_ref_mod, y_ref_mod, theta_ref_mod, np.copy(v_ref), (len(chain_list) > 0 or abs(hold_corridor_d) > 0.2)
 
     def compute_safe_speed_profile(self, x_init, x_ref_mod, y_ref_mod, theta_ref_mod, v_ref_base):
-        """Điều chỉnh vận tốc mục tiêu an toàn khi tiếp cận và đi qua vật cản"""
+        """Điều chỉnh vận tốc mục tiêu an toàn khi tiếp cận và đi qua cụm vật cản"""
         v_adapted = np.copy(v_ref_base)
         s_ego, _, _, _, _ = self.project_to_frenet(x_init[0], x_init[1], hint_idx=self.current_traj_idx)
 
         if self.active_obstacle is not None:
-            s_rear = self.active_obstacle.get('s_rear', s_ego + 10.0)
-            s_front = self.active_obstacle.get('s_front', s_rear + 2.0)
+            s_rear = self.active_obstacle.get('group_s_rear', self.active_obstacle.get('s_rear', s_ego + 10.0))
+            s_front = self.active_obstacle.get('group_s_front', self.active_obstacle.get('s_front', s_rear + 2.0))
 
             dist_to_obs = (s_rear - EGO_FRONT_OVERHANG_M) - s_ego
             dist_after_obs = s_ego - (s_front + OBSTACLE_HOLD_DISTANCE_M)
@@ -871,10 +924,11 @@ class LinearizedMpcController:
             fine_steer = FINE_STEER_COEF * (U[0, k] ** 2)
             fine_acc = FINE_ACC_COEF * (U[1, k] ** 2)
 
-            # Phạt độ mượt nội bộ chân trời (k > 0)
-            fine_steer_dot = 0.0
-            fine_acc_dot = 0.0
-            if k > 0:
+            # Phạt độ mượt góc lái và gia tốc (bao gồm cả bước đầu tiên k=0 so với u_prev để chống giật góc lái giữa 2 chu kỳ)
+            if k == 0:
+                fine_steer_dot = FINE_STEER_DOT_COEF * ((U[0, 0] - float(self.u_prev[0])) ** 2)
+                fine_acc_dot = FINE_ACC_DOT_COEF * ((U[1, 0] - float(self.u_prev[1])) ** 2)
+            else:
                 fine_steer_dot = FINE_STEER_DOT_COEF * ((U[0, k] - U[0, k - 1]) ** 2)
                 fine_acc_dot = FINE_ACC_DOT_COEF * ((U[1, k] - U[1, k - 1]) ** 2)
 
@@ -883,39 +937,77 @@ class LinearizedMpcController:
 
         opti.set_initial(X[:, self.horizon], self.x_nom[:, self.horizon])
 
-        # RÀNG BUỘC SIÊU PHẲNG NÉ VẬT CẢN
-        if obstacles and len(obstacles) > 0:
+        # RÀNG BUỘC HÀNH LANG SIÊU PHẲNG NÉ VẬT CẢN (SONG SONG VỚI TRỤC ĐƯỜNG FRENET)
+        # Chỉ kích hoạt tại các bước k đi ngang qua thân vật cản [s_rear - L_f, s_front + L_r],
+        # và tự động ngắt ngay khi xe bước vào pha trả làn (Return-to-Lane) để nhập làn êm, không lắc.
+        if (not is_roadblock) and obstacles and len(obstacles) > 0:
             tx_ego = math.cos(x_init[2])
             ty_ego = math.sin(x_init[2])
             ahead_obs = [
                 obs for obs in obstacles
-                if (tx_ego * (obs['x'] - x_init[0]) + ty_ego * (obs['y'] - x_init[1])) >= -1.0
+                if (tx_ego * (obs['x'] - x_init[0]) + ty_ego * (obs['y'] - x_init[1])) >= -2.5
             ]
             ahead_obs.sort(key=lambda o: math.hypot(o['x'] - x_init[0], o['y'] - x_init[1]))
-            active_obs = ahead_obs[:3]
+            active_obs = ahead_obs[:4]
             num_obs = len(active_obs)
 
             if num_obs > 0:
                 eps_slack = opti.variable(num_obs, self.horizon)
                 opti.subject_to(ca.vec(eps_slack) >= 0)
+                r_safe = EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M
+
+                # Tính trước tọa độ dọc s_k và pháp tuyến đường tại mỗi bước k trên chân trời
+                xr_base = x_ref_orig if x_ref_orig is not None else x_ref
+                yr_base = y_ref_orig if y_ref_orig is not None else y_ref
+                thr_base = theta_ref_orig if theta_ref_orig is not None else theta_ref
+                s_k_list = []
+                nx_k_list = []
+                ny_k_list = []
+                d_ref_k_list = []
+                for k in range(self.horizon):
+                    sk, _, _, _, _ = self.project_to_frenet(float(xr_base[k]), float(yr_base[k]), hint_idx=self.current_traj_idx)
+                    nx_k = -math.sin(float(thr_base[k]))
+                    ny_k = math.cos(float(thr_base[k]))
+                    d_rk = (float(x_ref[k]) - float(xr_base[k])) * nx_k + (float(y_ref[k]) - float(yr_base[k])) * ny_k
+                    s_k_list.append(sk)
+                    nx_k_list.append(nx_k)
+                    ny_k_list.append(ny_k)
+                    d_ref_k_list.append(d_rk)
 
                 for m, obs in enumerate(active_obs):
-                    x_o = obs['x']
-                    y_o = obs['y']
-                    r_safe = EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M
+                    if 's_rear' in obs and 's_front' in obs and 'd_min' in obs and 'd_max' in obs:
+                        s_r_o = float(obs['s_rear'])
+                        s_f_o = float(obs['s_front'])
+                        d_min_o = float(obs['d_min'])
+                        d_max_o = float(obs['d_max'])
+                    else:
+                        s_r_o, s_f_o, d_min_o, d_max_o = self.compute_obstacle_frenet_bounds(obs)
+
+                    s_zone_start = s_r_o - EGO_FRONT_OVERHANG_M - 0.5
+                    s_zone_end = s_f_o + EGO_REAR_OVERHANG_M + 0.5
+                    obs_d_center = 0.5 * (d_min_o + d_max_o)
 
                     for k in range(self.horizon):
-                        x_bar_k = self.x_nom[0, k]
-                        y_bar_k = self.x_nom[1, k]
-                        dx_nom = x_bar_k - x_o
-                        dy_nom = y_bar_k - y_o
-                        dist_nom = math.sqrt(dx_nom ** 2 + dy_nom ** 2) + 1e-4
+                        if s_zone_start <= s_k_list[k] <= s_zone_end:
+                            nx_k = nx_k_list[k]
+                            ny_k = ny_k_list[k]
+                            d_lat_k = (X[0, k] - float(xr_base[k])) * nx_k + (X[1, k] - float(yr_base[k])) * ny_k
+                            d_rk = d_ref_k_list[k]
 
-                        if dist_nom <= r_safe + 3.5:
-                            nx_bar = dx_nom / dist_nom
-                            ny_bar = dy_nom / dist_nom
-                            lhs = nx_bar * (X[0, k] - x_o) + ny_bar * (X[1, k] - y_o) + eps_slack[m, k]
-                            opti.subject_to(lhs >= r_safe)
+                            if abs(d_rk) > 0.05:
+                                pass_sign = 1.0 if d_rk > 0.0 else -1.0
+                            elif obs.get('side_sign') is not None:
+                                pass_sign = float(obs['side_sign'])
+                            else:
+                                pass_sign = -1.0 if obs_d_center > 0.25 else 1.0
+
+                            if pass_sign > 0.0:
+                                # Né về phía bên PHẢI vật cản (d > d_max_o + r_safe)
+                                opti.subject_to(d_lat_k + eps_slack[m, k] >= d_max_o + r_safe)
+                            else:
+                                # Né về phía bên TRÁI vật cản (d < d_min_o - r_safe)
+                                opti.subject_to(-d_lat_k + eps_slack[m, k] >= -d_min_o + r_safe)
+
                             cost += MPC_W_SLACK * (eps_slack[m, k] ** 2) + MPC_W_SLACK_LINEAR * eps_slack[m, k]
 
         opti.minimize(cost)
@@ -926,7 +1018,8 @@ class LinearizedMpcController:
             u_opt = np.array(sol.value(U), dtype=float)
             cost_opt = float(sol.value(cost))
             if self._yellow_solid_active:
-                self._last_max_eps_road = float(np.max(sol.value(eps_road)))
+                eps_vals = np.array(sol.value(eps_road), dtype=float).flatten()
+                self._last_max_eps_road = float(np.max(eps_vals[2:])) if len(eps_vals) > 2 else float(np.max(eps_vals))
             else:
                 self._last_max_eps_road = 0.0
         except Exception:
@@ -934,32 +1027,81 @@ class LinearizedMpcController:
             u_opt = np.array(opti.debug.value(U), dtype=float)
             cost_opt = float(opti.debug.value(cost))
             if self._yellow_solid_active:
-                self._last_max_eps_road = float(np.max(opti.debug.value(eps_road)))
+                eps_vals = np.array(opti.debug.value(eps_road), dtype=float).flatten()
+                self._last_max_eps_road = float(np.max(eps_vals[2:])) if len(eps_vals) > 2 else float(np.max(eps_vals))
             else:
                 self._last_max_eps_road = 0.0
 
         return x_opt, u_opt, cost_opt
 
+    def _resample_ref_by_speed(self, x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles=None):
+        """
+        Nội suy liên tục quỹ đạo tham chiếu (x_ref, y_ref, theta_ref) dọc theo độ dài cung s_traj
+        khớp chính xác với vận tốc thực tế/mục tiêu của xe trên chân trời dự đoán:
+        - Triệt tiêu hoàn toàn sai lệch pha không gian khi xe giảm tốc xuống OBSTACLE_CAUTION_SPEED_MS (5.0 m/s),
+          tránh hiện tượng điểm tham chiếu phóng quá xa kéo xe rẽ sớm hoặc trả làn sớm khi đang đi ngang vật cản.
+        """
+        if self.x_traj is None or self.s_traj is None or len(self.s_traj) < 2:
+            return x_ref, y_ref, theta_ref
+
+        s_ego, d_ego, _, _, idx_ego = self.project_to_frenet(float(x_init[0]), float(x_init[1]), hint_idx=self.current_traj_idx)
+        self.current_traj_idx = idx_ego
+
+        has_near_obs = bool(self.active_chain) or (abs(d_ego) > 0.35)
+        if not has_near_obs and detected_obstacles:
+            for obs in detected_obstacles:
+                if obs.get('dist', 99.0) <= OBSTACLE_SLOWDOWN_DISTANCE_M + 8.0 and abs(obs.get('d_lat', 99.0)) <= 3.0:
+                    has_near_obs = True
+                    break
+
+        v_curr = max(float(x_init[3]), 2.5)
+        s_max = float(self.s_traj[-1])
+        s_queries = np.zeros(self.horizon, dtype=float)
+        s_acc = s_ego
+
+        for k in range(self.horizon):
+            s_queries[k] = min(s_acc, s_max)
+            v_tgt = min(float(v_ref[k]), OBSTACLE_CAUTION_SPEED_MS) if has_near_obs else float(v_ref[k])
+            dv = np.clip(v_tgt - v_curr, -2.5 * self.dt, 2.0 * self.dt)
+            v_curr = max(2.0, v_curr + dv)
+            s_acc += v_curr * self.dt
+
+        x_sync = np.interp(s_queries, self.s_traj, self.x_traj)
+        y_sync = np.interp(s_queries, self.s_traj, self.y_traj)
+        theta_sync = np.interp(s_queries, self.s_traj, self.theta_traj)
+        return x_sync, y_sync, theta_sync
+
     def solve(self, x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles=None):
         """
         Thực hiện toàn bộ chu trình Tuyến tính hóa lặp (Iterative Linearization Loop):
-        1. Dời tạm tham chiếu cục bộ đa tình huống (Universal Local Reference Shifting).
-        2. Tự động điều chỉnh profile tốc độ an toàn (Speed Governor & Roadblock Braking).
-        3. Duy trì liên tục quỹ đạo danh định Warm-start (không reset đột ngột).
-        4. Chạy vòng lặp giải QP.
+        1. Đồng bộ bước không gian quỹ đạo tham chiếu theo vận tốc thực tế (_resample_ref_by_speed).
+        2. Dời tạm tham chiếu cục bộ đa tình huống (Universal Local Reference Shifting).
+        3. Tự động điều chỉnh profile tốc độ an toàn (Speed Governor & Roadblock Braking).
+        4. Duy trì liên tục quỹ đạo danh định Warm-start (không reset đột ngột).
+        5. Chạy vòng lặp giải QP.
         """
+        x_ref, y_ref, theta_ref = self._resample_ref_by_speed(
+            x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles=detected_obstacles
+        )
+
         x_ref_mod, y_ref_mod, theta_ref_mod, _, has_shift = self.compute_local_reference_shift(
             x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles
         )
         self.x_ref_mod = x_ref_mod
         self.y_ref_mod = y_ref_mod
 
+        r_clear_obs = EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M
         all_obs = []
         if self.active_obstacle is not None:
             all_obs.append(self.active_obstacle)
         if detected_obstacles:
             for obs in detected_obstacles:
                 if self.active_obstacle is None or obs.get('id') != self.active_obstacle.get('id'):
+                    # Bỏ qua vật cản nằm hoàn toàn ở làn ngược chiều bên kia vạch vàng SOLID
+                    if self._yellow_solid_active and self._yellow_blocks_left and self._yellow_road_limit is not None:
+                        _, _, _, d_max_o = self.compute_obstacle_frenet_bounds(obs)
+                        if (d_max_o + r_clear_obs) <= (float(self._yellow_road_limit) + 0.05):
+                            continue
                     all_obs.append(obs)
 
         # Xử lý Roadblock Emergency Stop (Giữ nguyên quỹ đạo làn đang né x_ref_mod, y_ref_mod và phanh dừng trước vật cản chặn làn)
@@ -1027,18 +1169,15 @@ class LinearizedMpcController:
             acc_m_s2 = float(u_opt[1, 0])
 
             # NẾU QUỸ ĐẠO MPC BẮT BUỘC PHẢI QUA VẠCH VÀNG NÉT LIỀN ĐƠN/ĐÔI:
-            # Tự động phanh dừng an toàn trước vạch vàng, tuyệt đối không chạm vạch!
-            if self._yellow_solid_active:
-                # Kiểm tra nếu bất kỳ điểm nào trong quỹ đạo dự đoán x_nom có d_lat vi phạm vạch vàng (< -0.40m)
-                # hoặc biến bù eps_road vượt ngưỡng (> 0.05m):
+            # Chỉ kích hoạt dừng nếu có vật cản đang ép quỹ đạo dự đoán đi sâu qua giới hạn (< lim - 0.25m, tức sát vạch vàng < 10cm)
+            # VÀ đang tiếp tục lệch thêm sang trái (không khóa nhầm khi xe đang trả lái về tim đường).
+            if self._yellow_solid_active and self.active_obstacle is not None:
                 is_crossing_yellow = False
-                if getattr(self, '_last_max_eps_road', 0.0) > 0.05:
-                    is_crossing_yellow = True
                 if self.x_nom is not None and self._yellow_road_limit is not None:
-                    # Kiểm tra tọa độ lateral trong chân trời dự đoán
-                    for k in range(min(self.horizon, self.x_nom.shape[1])):
+                    _, d_pred_0, _, _, _ = self.project_to_frenet(float(self.x_nom[0, 0]), float(self.x_nom[1, 0]))
+                    for k in range(4, min(self.horizon + 1, self.x_nom.shape[1])):
                         _, d_pred_k, _, _, _ = self.project_to_frenet(float(self.x_nom[0, k]), float(self.x_nom[1, k]))
-                        if d_pred_k < (self._yellow_road_limit - 0.05):
+                        if d_pred_k < (self._yellow_road_limit - 0.25) and d_pred_k < (d_pred_0 - 0.05):
                             is_crossing_yellow = True
                             break
 
@@ -1048,7 +1187,7 @@ class LinearizedMpcController:
                         f"Quỹ đạo dự đoán MPC phải đi qua vạch vàng nét liền. "
                         f"Kích hoạt phanh dừng an toàn trước vạch vàng!"
                     )
-                    return 0.0, -ROADBLOCK_DECELERATION_M_S_2
+                    return max(0.0, steer_rad), -ROADBLOCK_DECELERATION_M_S_2
 
             self.u_prev = np.array([steer_rad, acc_m_s2])
 

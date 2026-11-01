@@ -40,16 +40,16 @@ MAX_CONTROL_WHEEL_ANGLE_RAD = 70.0 / 180.0 * np.pi
 MAX_CONTROL_ACCELERATION_M_S_2 = 10.0
 MAX_CONTROL_BRAKING_M_S_2 = -4.1
 
-# Trọng số tối ưu MPC (Cân bằng biên độ - pha, triệt tiêu hoàn toàn dao động hình sin khi bám đường & nhập làn)
+# Trọng số tối ưu MPC (Cân bằng biên độ - pha, triệt tiêu dao động hình sin và bám làn ổn định khi nhập làn)
 FINE_X_COEF = 20.0           # Phạt sai số X
 FINE_Y_COEF = 20.0           # Phạt sai số Y
 FINE_V_COEF = 25.0           # Phạt sai số vận tốc V
-FINE_THETA_COEF = 35.0       # Phạt sai số góc hướng Theta (đủ lớn để giữ mũi xe ổn định khi nhập làn)
-FINE_LATERAL_COEF = 40.0     # Phạt độ lệch ngang vuông góc vừa phải (không quá gắt gây vọt lố qua lại tim đường)
-FINE_STEER_COEF = 35.0       # Phạt biên độ góc lái
-FINE_ACC_COEF = 1.0          # Phạt gia tốc
-FINE_STEER_DOT_COEF = 1000.0 # Phạt tốc độ bẻ lái nội bộ chân trời (k = 1..N-1)
-FINE_ACC_DOT_COEF = 30.0     # Phạt giật ga/phanh
+FINE_THETA_COEF = 30.0       # Phạt sai số góc hướng Theta (giữ mũi xe ổn định, dứt khoát nắn thẳng khi nhập làn)
+FINE_LATERAL_COEF = 30.0     # Phạt độ lệch ngang vuông góc (hút xe về tim đường dứt khoát, không để trôi làn)
+FINE_STEER_COEF = 40.0       # Phạt biên độ góc lái
+FINE_ACC_COEF = 4.0          # Phạt gia tốc (cân bằng bám tốc độ và êm ái, tránh nhấp nhả ga/phanh)
+FINE_STEER_DOT_COEF = 2000.0 # Phạt tốc độ bẻ lái nội bộ chân trời và giữa 2 chu kỳ (triệt tiêu giật lái mà không gây trễ pha trả lái)
+FINE_ACC_DOT_COEF = 180.0    # Phạt giật ga/phanh (triệt tiêu độ giật dọc Jerk da/dt < 2.0 m/s^3)
 
 # ==============================================================================
 # --- CẤU HÌNH SINH VẬT CẢN (OBSTACLE GENERATION) ---
@@ -158,10 +158,10 @@ ROADBLOCK_DECELERATION_M_S_2 = 3.0     # Gia tốc hãm phanh êm ái khi dừng
 # ==============================================================================
 # --- CẤU HÌNH HÌNH HỌC ĐƯỜNG CONG NÉ VẬT CẢN (S-CURVE MANEUVER GEOMETRY) ---
 # ==============================================================================
-OBSTACLE_APPROACH_RAMP_M = 12.0         # Chiều dài dốc mở lái trước mũi xe - đuôi vật cản (m)
+OBSTACLE_APPROACH_RAMP_M = 18.0         # Chiều dài dốc mở lái trước mũi xe - đuôi vật cản (18m giúp tiếp cận êm, không ngoặt gắt)
 OBSTACLE_APPROACH_MARGIN_M = 2.5       # Khoảng đệm hoàn tất 100% mở lái trước đuôi vật cản (m)
-OBSTACLE_HOLD_DISTANCE_M = 3.5        # Khoảng đệm giữ làn sau khi đuôi xe vượt qua mũi vật cản (m)
-OBSTACLE_RETURN_RAMP_M = 10.0         # Chiều dài dốc trả lái êm về tim đường (15m giúp góc nhập làn nhỏ, không vọt lố)
+OBSTACLE_HOLD_DISTANCE_M = 4.0        # Khoảng đệm giữ làn sau khi đuôi xe vượt qua mũi vật cản (m)
+OBSTACLE_RETURN_RAMP_M = 16.0         # Chiều dài dốc trả lái êm về tim đường (16m giúp góc nhập làn nhỏ, triệt tiêu vọt lố)
 
 # ==============================================================================
 # --- CẤU HÌNH COCKPIT DASHBOARD ĐA MÀN HÌNH (FOLLOW CAMERA VIEWER) ---

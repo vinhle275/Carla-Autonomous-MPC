@@ -49,16 +49,17 @@ def load_csv_trajectory(filepath=None):
     print(f"[LOAD TRAJECTORY] Đã tải thành công {len(x_traj)} waypoints từ: {filepath}")
     return x_traj, y_traj, theta_traj, v_ref
 
-def update_reference_point(x0, y0, current_idx, x_traj, y_traj, search_range=50):
+def update_reference_point(x0, y0, current_idx, x_traj, y_traj, search_range=150):
     """
     Tìm chỉ số Waypoint gần nhất trên đường đi xung quanh vị trí hiện tại của xe.
+    Mở rộng search_range=150 (~15m) để không bao giờ bị lạc waypoint khi xe né lệch ngang lớn (d >= 3.5m).
     """
     total_len = len(x_traj)
     if current_idx == 0:
         start_search = 0
-        end_search = min(total_len, 300)
+        end_search = min(total_len, 400)
     else:
-        start_search = max(0, current_idx - 10)
+        start_search = max(0, current_idx - 30)
         end_search = min(total_len, current_idx + search_range)
 
     min_dist = float('inf')

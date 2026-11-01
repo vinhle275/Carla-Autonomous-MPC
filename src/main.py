@@ -29,7 +29,7 @@ from src.config import (
     ENABLE_CHASE_CAMERA_WINDOW, CAMERA_WINDOW_WIDTH, CAMERA_WINDOW_HEIGHT,
     ENABLE_SPECTATOR_FOLLOW,
     ENABLE_MOVING_OBSTACLES, MOVING_OBSTACLES_CSV_PATH,
-    MAX_CONTROL_BRAKING_M_S_2,
+    MAX_CONTROL_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD,
     ENABLE_YELLOW_LINE_DETECTOR, DEBUG_YELLOW_DRAW,
     CAM_IMAGE_WIDTH, CAM_IMAGE_HEIGHT, CAM_FOV_DEG,
 )
@@ -308,13 +308,15 @@ def main():
                     and yellow_result.d_yellow_line_m <= 1.15):
                 v_lat_ego = v0 * np.sin(theta0 - theta_ref[0])
                 is_rb = hasattr(mpc_controller, 'is_roadblock') and mpc_controller.is_roadblock
+                # Mớm lái sang phải tăng dần theo độ gần vạch vàng thay vì nhảy số cứng 0.08
+                push_right = float(np.clip(0.03 + (1.15 - yellow_result.d_yellow_line_m) * 0.35, 0.03, 0.09))
                 if is_rb or (yellow_result.d_yellow_line_m <= 1.05 and v_lat_ego < -0.02 and v0 > 0.3):
                     throttle = 0.0
                     brake = 1.0
-                    steer = max(0.08, steer)
+                    steer = max(push_right, steer)
                     print(f"\n[DỪNG AN TOÀN TRƯỚC VẠCH VÀNG] Cự ly tới vạch vàng chỉ còn {yellow_result.d_yellow_line_m:.2f}m (mép xe <= 15cm)! Phanh an toàn!")
                 else:
-                    steer = max(0.08, steer)
+                    steer = max(push_right, steer)
 
             logger.log_controller_output(steer, throttle, brake, cost=cost_val)
             carla.apply_control(steer, throttle, brake)

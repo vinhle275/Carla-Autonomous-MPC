@@ -352,7 +352,9 @@ class LinearizedMpcController:
         """
         Hàm trọng số S-Curve mượt mà theo khoảng dọc [s_rear, s_front]:
         - Mở lái hoàn tất trước mũi xe: s_hold_start = s_rear - EGO_FRONT_OVERHANG_M - OBSTACLE_APPROACH_MARGIN_M
+        - Điểm bắt đầu mở lái dốc thoai thoải: s_app_start = s_hold_start - OBSTACLE_APPROACH_RAMP_M
         - Giữ làn né 100% đến khi thoát thân xe: s_hold_end = s_front + OBSTACLE_HOLD_DISTANCE_M
+        - Trả lái êm ái về tim đường: s_ret_end = s_hold_end + OBSTACLE_RETURN_RAMP_M
         """
         s_hold_start = s_rear - EGO_FRONT_OVERHANG_M - OBSTACLE_APPROACH_MARGIN_M
         s_app_start = s_hold_start - OBSTACLE_APPROACH_RAMP_M
@@ -737,7 +739,7 @@ class LinearizedMpcController:
             if math.hypot(dx, dy) > 1e-3:
                 th_target = math.atan2(dy, dx)
                 d_th = normalize_angle(th_target - theta_ref[k])
-                theta_ref_mod[k] = theta_ref[k] + 0.90 * d_th
+                theta_ref_mod[k] = theta_ref[k] + 0.70 * d_th
         if n_ref > 1:
             theta_ref_mod[-1] = theta_ref_mod[-2]
 

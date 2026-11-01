@@ -12,7 +12,6 @@ MOVING_OBSTACLES_CSV_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../data/moving_obstacles.csv")
 )
 OBSTACLE_SIZE = 0.5                   # Kích thước khối hộp vật cản (m)
-USE_FIXED_OBSTACLES_CSV = True        # True: Ưu tiên spawn vật cản cố định từ data/obstacles.csv nếu có
 PLOTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../plots")
 )
@@ -52,24 +51,10 @@ FINE_STEER_DOT_COEF = 2000.0 # Phạt tốc độ bẻ lái nội bộ chân tr�
 FINE_ACC_DOT_COEF = 180.0    # Phạt giật ga/phanh (triệt tiêu độ giật dọc Jerk da/dt < 2.0 m/s^3)
 
 # ==============================================================================
-# --- CẤU HÌNH SINH VẬT CẢN (OBSTACLE GENERATION) ---
+# --- CẤU HÌNH SINH VẬT CẢN TĨNH (STATIC OBSTACLES) ---
 # ==============================================================================
-ENABLE_OBSTACLES = True               # True: Tự động sinh vật cản; False: Chế độ thuần bám quỹ đạo (không sinh vật cản)
-OBSTACLE_START_DISTANCE_M = 25.0      # Bắt đầu xuất hiện từ mét thứ 25 của quỹ đạo (có thể thay đổi số này)
-OBSTACLE_START_TRAJECTORY_FRACTION = None  # (Tùy chọn fallback) Đặt None để ưu tiên dùng OBSTACLE_START_DISTANCE_M
-OBSTACLE_END_TRAJECTORY_FRACTION = 0.95    # Giới hạn kết thúc sinh vật cản (trước 5% cuối)
-OBSTACLE_MIN_DISTANCE_M = 50.0        # Khoảng cách tối thiểu giữa các CỤM vật cản liên tiếp (m)
-OBSTACLE_PREVIEW_DURATION_SEC = 60.0  # Thời gian vật cản tồn tại trước khi tự dọn dẹp (giây)
-
-# Cấu hình cụm vật cản gần nhau (Clustered Obstacles):
-ENABLE_OBSTACLE_CLUSTERS = True       # Bật sinh cụm vật cản gần nhau (2-3 vật cản chỉ cách nhau 2-3m)
-OBSTACLE_CLUSTER_SPACING_M = 2.5      # Khoảng cách giữa các vật cản trong CÙNG MỘT CỤM (2 - 3m)
-OBSTACLE_CLUSTER_CHANCE = 0.6         # Tỷ lệ sinh cụm nhiều vật cản (60% sinh cụm 2-3 vật cản, 40% sinh vật cản đơn)
-OBSTACLE_CLUSTER_SIZES = [2, 3]       # Kích thước cụm khi kích hoạt (ngẫu nhiên 2 hoặc 3 vật cản gần nhau)
-
-# Độ lệch ngang so với tim đường (m):
-# 0.0: Nằm trực tiếp TRÊN quỹ đạo; dương (> 0): lệch phải (+Y); âm (< 0): lệch trái (-Y) (GẦN quỹ đạo)
-OBSTACLE_LATERAL_OFFSETS = [0.0, -1.5, 1.5, -0.8, 0.8]
+ENABLE_OBSTACLES = True               # True: Spawn vật cản cố định từ data/obstacles.csv; False: Chạy thuần bám quỹ đạo
+OBSTACLE_PREVIEW_DURATION_SEC = 60.0  # Thời gian vật cản tồn tại khi chạy độc lập script obstacle_generator.py (giây)
 
 # Danh sách Blueprint các vật cản tĩnh phong phú (Cọc tiêu, rào chắn, thùng hàng, xe đỗ tĩnh)
 # STATIC_OBSTACLE_BLUEPRINTS = [
@@ -134,7 +119,6 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 OBSTACLE_CAUTION_SPEED_MS = 6.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~18.0 km/h - lướt êm, thoát nhanh, không quá chậm)
 OBSTACLE_SLOWDOWN_DISTANCE_M = 15.0   # Khoảng cách bắt đầu giảm tốc êm (m)
 OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 2.0  # Hành lang khoảng cách lệch ngang tối đa so với tim đường (|d_lat| <= 2.0m) để kích hoạt né (bỏ qua xe làn bên cạnh)
-OBSTACLE_PREFER_BYPASS_SIDE = 'left'  # Hướng né ưu tiên khi vật cản nằm chính giữa tim đường ('left' hoặc 'right')
 
 # ==============================================================================
 # --- CẤU HÌNH 2 CHẾ ĐỘ ĐIỀU KHIỂN & PHANH GẤP VÙNG NGUY HIỂM VA CHẠM ---
@@ -152,8 +136,8 @@ EMERGENCY_MOVING_SPEED_THRESHOLD_MS = 0.2 # Ngưỡng vận tốc (m/s) để x�
 # --- CẤU HÌNH PHANH DỪNG KHẨN CẤP KHI PHONG TỎA ĐƯỜNG (SAFE EMERGENCY STOP) ---
 # ==============================================================================
 ENABLE_ROADBLOCK_EMERGENCY_STOP = True  # True: Tự động phanh dừng an toàn nếu cả 2 bên làn đều bị chặn, không có lối né
-ROADBLOCK_SAFE_STOP_DISTANCE_M = 2.5   # Khoảng cách dừng an toàn trước hàng rào vật cản (m)
-ROADBLOCK_DECELERATION_M_S_2 = 3.0     # Gia tốc hãm phanh êm ái khi dừng khẩn cấp (m/s^2)
+ROADBLOCK_SAFE_STOP_DISTANCE_M = 5.5   # Khoảng cách dừng an toàn trước hàng rào vật cản (m) (giữ cản trước cách vật cản ~3.5-4.0m)
+ROADBLOCK_DECELERATION_M_S_2 = 1.6     # Gia tốc hãm phanh êm ái khi dừng khẩn cấp (m/s^2) (1.6 m/s^2 giúp hãm phanh êm từ xa, không trôi sát vật cản)
 
 # ==============================================================================
 # --- CẤU HÌNH HÌNH HỌC ĐƯỜNG CONG NÉ VẬT CẢN (S-CURVE MANEUVER GEOMETRY) ---

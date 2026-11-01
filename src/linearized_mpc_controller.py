@@ -12,7 +12,7 @@ from src.config import (
     OBSTACLE_AVOIDANCE_MARGIN_M,
     SENSOR_DETECTION_RANGE_M,
     OBSTACLE_CAUTION_SPEED_MS, OBSTACLE_SLOWDOWN_DISTANCE_M,
-    OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M, OBSTACLE_PREFER_BYPASS_SIDE,
+    OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M,
     OBSTACLE_APPROACH_RAMP_M, OBSTACLE_APPROACH_MARGIN_M,
     OBSTACLE_HOLD_DISTANCE_M, OBSTACLE_RETURN_RAMP_M,
     ENABLE_ROADBLOCK_EMERGENCY_STOP, ROADBLOCK_SAFE_STOP_DISTANCE_M, ROADBLOCK_DECELERATION_M_S_2,
@@ -233,12 +233,16 @@ class LinearizedMpcController:
 
     def get_legal_corridor_bounds(self):
         """
-        Xác định Hành lang Pháp lý Động [road_min, road_max] thống nhất cho toàn bộ chu kỳ MPC:
-        - Bình thường / Vạch đứt (DASHED): [-5.25m, +5.25m]
-        - Vạch vàng nét liền (SOLID) bên trái: [lim, +5.25m] với lim = -1.75 + (1.0 + 0.35) = -0.40m
+        Xác định Hành lang Pháp lý Động [road_min, road_max] cho TÂM XE (Ego Center):
+        - Mép mặt đường vật lý là +-DEFAULT_ROAD_HALF_WIDTH_M (+-5.25m).
+        - Trừ đi bán kính thân xe (1.0m) + lề an toàn dự phòng (0.35m) = 1.35m để sườn xe không leo vỉa hè:
+          -> Biên tâm xe tối đa bên phải: road_max = 5.25 - 1.35 = +3.90m.
+          -> Biên tâm xe tối đa bên trái: road_min = -5.25 + 1.35 = -3.90m (khi vạch đứt).
+        - Vạch vàng nét liền (SOLID) bên trái: road_min = max(-3.90m, lim) với lim = -1.75 + (1.0 + 0.35) = -0.40m.
         """
-        road_min = -DEFAULT_ROAD_HALF_WIDTH_M
-        road_max =  DEFAULT_ROAD_HALF_WIDTH_M
+        r_edge_clearance = EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M
+        road_min = -DEFAULT_ROAD_HALF_WIDTH_M + r_edge_clearance
+        road_max =  DEFAULT_ROAD_HALF_WIDTH_M - r_edge_clearance
         is_yellow_solid = bool(self._yellow_solid_active and self._yellow_blocks_left)
         if is_yellow_solid:
             lim = float(self._yellow_road_limit) if self._yellow_road_limit is not None else (-1.75 + EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
@@ -328,19 +332,17 @@ class LinearizedMpcController:
             d_cand = float(np.clip(0.0, g_low + pad, g_high - pad))
 
             cost = abs(d_cand)
-            # Phạt bất đối xứng theo luật giao thông:
-            # Lấn qua vạch vàng đứt sang làn ngược chiều (d_cand < yellow_limit) chịu phạt +0.85 để luôn ưu tiên né PHẢI
+            # Luật giao thông chuẩn (Right-Hand Traffic):
+            # - Vượt qua vạch vàng sang làn đối diện (d_cand < yellow_limit) chịu phạt nặng +0.85
+            # - Ưu tiên tự nhiên giữ làn cùng chiều bên phải: mọi khe lệch sang trái (d_cand < -0.05) chịu phạt +0.15
             if d_cand < yellow_limit:
                 cost += 0.85
-            elif d_cand < -0.05 and OBSTACLE_PREFER_BYPASS_SIDE == 'right':
+            elif d_cand < -0.05:
                 cost += 0.15
 
+            # Giữ tính liên tục của hành lang né (chống đổi bên ziczac đột ngột)
             if preferred_sign is not None and abs(d_cand) > 0.05 and (d_cand * preferred_sign < 0):
                 cost += 1.50  # Phạt nặng việc đổi chiều làn đột ngột để giữ hành lang ổn định
-            elif preferred_sign is None and abs(d_cand) > 0.05:
-                pref_dir = -1.0 if OBSTACLE_PREFER_BYPASS_SIDE == 'left' else 1.0
-                if d_cand * pref_dir < 0:
-                    cost += 0.10
 
             if cost < best_cost:
                 best_cost = cost
@@ -688,22 +690,22 @@ class LinearizedMpcController:
         else:
             self.active_obstacle = None
 
-        # 5. Tính toán đường bao dịch ngang d_shift_k trên từng Hành Lang Phẳng Liền Khối (corridor_groups)
-        # Đặc biệt: nếu phát hiện Roadblock khi đang ở trong làn né, giữ nguyên độ dịch ngang của làn né
-        # xuyên suốt tới qua điểm dừng để xe phanh thẳng mượt ngay trong làn né, tuyệt đối không kéo xe về tim đường đâm vào chuỗi vật cản!
+        # 5. Xử lý hành lang ngang khi ROADBLOCK hoặc khi né vật cản bình thường:
+        # - Khi phát hiện Roadblock:
+        #   + Nếu xe đang chạy thẳng ở tim đường (|d_ego| <= 0.6m): Phanh thẳng ngay trên tim đường,
+        #     hủy toàn bộ corridor_groups né để không bẻ lái sang làn bên cạnh rồi mới dừng!
+        #   + Nếu xe đã lách hẳn sang làn né (|d_ego| > 0.6m): Giữ nguyên độ lệch ngang hiện tại (d_ego)
+        #     để phanh thẳng trên làn né, tuyệt đối không kéo xe về tim đường đâm vào vật cản!
         hold_corridor_d = 0.0
         hold_corridor_s_end = -1e9
-        if self.is_roadblock and blocking_slice is not None:
-            # Chỉ giữ độ lệch né nếu tim đường bị vật cản chặn trực tiếp
-            center_is_blocked = any(
-                (b_l < 0.30 and b_h > -0.30) for b_l, b_h in blocking_slice['blocked']
-            )
-            if center_is_blocked:
-                if abs(curr_d_target) > 0.2:
-                    hold_corridor_d = curr_d_target
-                elif abs(d_ego) > 0.35:
-                    hold_corridor_d = d_ego
-                hold_corridor_s_end = blocking_slice['s_front'] + 15.0
+        if self.is_roadblock:
+            corridor_groups = []
+            if abs(d_ego) <= 0.6:
+                hold_corridor_d = 0.0
+                self.active_obstacle = None
+            else:
+                hold_corridor_d = d_ego
+                hold_corridor_s_end = blocking_slice['s_front'] + 15.0 if blocking_slice is not None else s_ego + 30.0
 
         n_ref = len(x_ref)
         x_ref_mod = np.copy(x_ref)
@@ -933,7 +935,8 @@ class LinearizedMpcController:
             # Chi phí bám quỹ đạo đồng bộ thời gian thực tại bước k (t = k * dt)
             fine_x = FINE_X_COEF * (X[0, k] - x_ref[k]) ** 2
             fine_y = FINE_Y_COEF * (X[1, k] - y_ref[k]) ** 2
-            fine_v = FINE_V_COEF * (X[3, k] - v_ref[k]) ** 2
+            q_v = 120.0 if is_roadblock else FINE_V_COEF
+            fine_v = q_v * (X[3, k] - v_ref[k]) ** 2
             fine_theta = FINE_THETA_COEF * (X[2, k] - theta_ref[k]) ** 2
 
             if k < self.horizon - 1:
@@ -950,12 +953,13 @@ class LinearizedMpcController:
             fine_acc = FINE_ACC_COEF * (U[1, k] ** 2)
 
             # Phạt độ mượt góc lái và gia tốc (bao gồm cả bước đầu tiên k=0 so với u_prev để chống giật góc lái giữa 2 chu kỳ)
+            r_acc_dot_coef = (0.25 * FINE_ACC_DOT_COEF) if is_roadblock else FINE_ACC_DOT_COEF
             if k == 0:
                 fine_steer_dot = FINE_STEER_DOT_COEF * ((U[0, 0] - float(self.u_prev[0])) ** 2)
-                fine_acc_dot = FINE_ACC_DOT_COEF * ((U[1, 0] - float(self.u_prev[1])) ** 2)
+                fine_acc_dot = r_acc_dot_coef * ((U[1, 0] - float(self.u_prev[1])) ** 2)
             else:
                 fine_steer_dot = FINE_STEER_DOT_COEF * ((U[0, k] - U[0, k - 1]) ** 2)
-                fine_acc_dot = FINE_ACC_DOT_COEF * ((U[1, k] - U[1, k - 1]) ** 2)
+                fine_acc_dot = r_acc_dot_coef * ((U[1, k] - U[1, k - 1]) ** 2)
 
             cost += (fine_x + fine_y + fine_v + fine_theta + fine_lat +
                      fine_steer + fine_acc + fine_steer_dot + fine_acc_dot)

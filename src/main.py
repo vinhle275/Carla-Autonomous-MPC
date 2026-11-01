@@ -192,8 +192,10 @@ def main():
             # Cập nhật chỉ số waypoint gần nhất
             current_idx = update_reference_point(x0, y0, current_idx, x_traj, y_traj)
 
-            # Trích xuất đoạn quỹ đạo tham chiếu N bước phía trước
-            x_ref, y_ref, theta_ref, v_ref = get_ref_trajectory(x_traj, y_traj, theta_traj, v_ref_traj, current_idx)
+            # Trích xuất đoạn quỹ đạo tham chiếu N bước phía trước bằng nội suy cung đường theo vận tốc thực tế
+            x_ref, y_ref, theta_ref, v_ref = get_ref_trajectory(
+                x_traj, y_traj, theta_traj, v_ref_traj, current_idx, s_traj=s_traj, x0=x0, y0=y0
+            )
 
             # Khắc phục lỗi nhảy góc +-pi: Chuẩn hóa theta0 trùng nhánh góc liên tục với theta_ref[0]
             theta0 = theta_ref[0] + normalize_angle(theta0_raw - theta_ref[0])

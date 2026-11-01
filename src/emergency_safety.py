@@ -314,8 +314,8 @@ class EmergencySafetyManager:
             self.total_emergency_braking_time += dt
 
             # Điều kiện chuyển từ Chế độ 2 về Chế độ 1:
-            # Vùng nguy hiểm phải hoàn toàn KHÔNG CÓ vật cản liên tục sau khoảng thời gian clear_hold_time_sec
-            if len(obstacles_in_zone) == 0:
+            # Vùng nguy hiểm phải hoàn toàn KHÔNG CÓ vật cản kích hoạt liên tục sau khoảng thời gian clear_hold_time_sec
+            if len(triggering_obstacles) == 0:
                 self.clear_timer += dt
                 if self.clear_timer + 1e-4 >= self.clear_hold_time_sec:
                     self.current_mode = VehicleMode.MODE_1_NORMAL
@@ -325,14 +325,14 @@ class EmergencySafetyManager:
                     print(f"\n[AN TOÀN TRỞ LẠI] Vùng nguy hiểm trước đầu xe đã thông thoáng liên tục "
                           f"{self.clear_hold_time_sec:.1f}s! -> CHUYỂN VỀ CHẾ ĐỘ 1 (BÁM ĐƯỜNG NÉ VẬT CẢN)!")
             else:
-                # Vẫn còn vật cản trong vùng nguy hiểm -> reset bộ đếm thời gian an toàn
+                # Vẫn còn vật cản kích hoạt trong vùng nguy hiểm -> reset bộ đếm thời gian an toàn
                 self.clear_timer = 0.0
 
         # 3. Chuẩn bị thông tin hiển thị trạng thái
         is_triggered = (self.current_mode == VehicleMode.MODE_2_EMERGENCY_BRAKE)
         if is_triggered:
-            if len(obstacles_in_zone) > 0:
-                near_obs = obstacles_in_zone[0]
+            if len(triggering_obstacles) > 0:
+                near_obs = triggering_obstacles[0]
                 status_text = f"PHANH GẤP [CHẾ ĐỘ 2] - VẬT CẢN ({near_obs['dist_front']:.1f}m)"
             else:
                 rem_time = max(0.0, self.clear_hold_time_sec - self.clear_timer)

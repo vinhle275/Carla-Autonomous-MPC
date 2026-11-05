@@ -1,18 +1,19 @@
 """
 yellow_line_detector.py
 =======================
-Mô-đun Nhận Diện Vạch Vàng Thời Gian Thực (Real-Time Yellow Lane Detector)
-dành cho xe tự hành CARLA với hiệu năng < 10ms / khung hình.
+Nhận diện Vạch Kẻ & Hành Lang Mặt Đường bằng Computer Vision cổ điển (Front Hood-Cam).
 
-Quy trình:
-  1. Crop ROI 50% nửa dưới ảnh RGB → tiết kiệm CPU/VRAM.
-  2. Chuyển ROI sang HSV → lọc màu vàng bằng cv2.inRange() (C++ SIMD).
-  3. Biến đổi IPM (Inverse Perspective Mapping) → Bird's Eye View (BEV).
-  4. Sliding Window Vectorized (NumPy) → phân loại SOLID / DASHED / NONE.
-  5. Fit đa thức bậc 2 (x = ay² + by + c) trong không gian BEV.
-  6. Tính khoảng cách ngang Frenet d_yellow_line từ tâm xe tới vạch vàng.
+Quy trình (< 5 ms / frame):
+  1. Mask màu trên ảnh gốc: vạch VÀNG (Hue ~28, S thấp vì CARLA vẽ vàng nhạt) và vạch TRẮNG.
+  2. IPM GIẢI TÍCH: ma trận homography tính trực tiếp từ nội/ngoại tham số camera
+     (FOV, độ cao, góc pitch) → Bird's-Eye View đúng tỷ lệ mét, không cần đoán điểm.
+  3. Histogram cột + Sliding Window cho TỪNG vạch → vị trí ngang + tỷ lệ lấp đầy
+     (phân loại LIỀN / ĐỨT).
+  4. Đi từ tim xe ra 2 bên: vạch ĐỨT → đi qua (làn cùng chiều), vạch LIỀN / VÀNG → dừng.
+     Suy ra hành lang tâm xe [road_min, road_max] (theo hệ đường tham chiếu Frenet).
+  5. Fallback CARLA Map khi camera không đủ tin cậy.
 
-Tác giả: AutoAgent — chỉnh sửa cho CARLA Autonomous MPC
+Quy ước dấu: d < 0 là bên TRÁI, d > 0 là bên PHẢI (giống toàn bộ MPC).
 """
 
 from __future__ import annotations
@@ -22,9 +23,8 @@ import time
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
-# Xóa Qt plugin path của cv2 TRƯỚC KHI import cv2 để tránh lỗi xcb crash trên WSL/Linux
 for _qt_env in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"):
     os.environ.pop(_qt_env, None)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -33,584 +33,375 @@ import cv2
 import numpy as np
 
 from src.config import (
-    # --- Camera & IPM ---
-    CAM_IMAGE_WIDTH,
-    CAM_IMAGE_HEIGHT,
-    CAM_FOV_DEG,
-    IPM_SRC_POINTS,
-    IPM_DST_POINTS,
-    IPM_BEV_WIDTH,
-    IPM_BEV_HEIGHT,
-    # --- HSV ---
-    YELLOW_H_LOW,  YELLOW_H_HIGH,
-    YELLOW_S_LOW,  YELLOW_S_HIGH,
-    YELLOW_V_LOW,  YELLOW_V_HIGH,
-    # --- Sliding Window ---
-    YELLOW_NWIN,
-    YELLOW_WIN_MARGIN_PX,
-    YELLOW_MIN_PIX_PER_WIN,
-    # --- Phân loại Solid/Dashed ---
-    YELLOW_SOLID_FILL_RATIO,
-    YELLOW_DASHED_GAP_RATIO,
-    # --- Không gian vật lý BEV ---
-    BEV_METERS_PER_PIXEL_X,
-    BEV_METERS_PER_PIXEL_Y,
-    # --- Clearance xe ---
+    YELLOW_H_LOW, YELLOW_H_HIGH, YELLOW_S_LOW, YELLOW_V_LOW,
+    WHITE_S_HIGH, WHITE_V_LOW,
     EGO_HALF_WIDTH_M,
     YELLOW_LINE_CLEARANCE_M,
+    FRONT_CAM_X_M, FRONT_CAM_Z_M, FRONT_CAM_PITCH_DEG, FRONT_CAM_FOV_DEG,
 )
 
 
-# ==============================================================================
-# ENUM LOẠI VẠCH
-# ==============================================================================
-
 class LineType(Enum):
-    """Loại vạch vàng được phân loại từ sliding window"""
-    NONE   = "NONE"    # Không phát hiện vạch vàng đủ tin cậy
-    DASHED = "DASHED"  # Vạch đứt (cho phép xe vượt)
-    SOLID  = "SOLID"   # Vạch liền (CẤM xe đè / vượt)
+    NONE   = "NONE"
+    DASHED = "DASHED"
+    SOLID  = "SOLID"
 
 
-# ==============================================================================
-# DATACLASS KẾT QUẢ PERCEPTION
-# ==============================================================================
+@dataclass
+class LaneLine:
+    """Một vạch kẻ phát hiện trong BEV (offset tính theo thân xe Ego)."""
+    d_ego_m: float          # Khoảng cách ngang tới tâm xe (m), âm = trái
+    color: str              # 'yellow' | 'white'
+    line_type: LineType     # SOLID / DASHED
+    fill_ratio: float
+
 
 @dataclass
 class YellowLineResult:
-    """
-    Kết quả trả về từ RealtimeYellowLineDetector.detect().
-
-    Attributes:
-        line_type           : Loại vạch (NONE / DASHED / SOLID).
-        poly_coeffs         : Hệ số đa thức bậc 2 [a, b, c] fit vạch trong BEV
-                              (x_bev = a*y² + b*y + c).  None nếu không phát hiện.
-        d_yellow_line_m     : Khoảng cách ngang (m) từ tâm xe tới vạch vàng trong
-                              không gian Frenet.  Âm = vạch bên trái xe.
-                              None nếu không phát hiện.
-        road_max_m          : Giới hạn biên trái hành lang lái xe sau khi đã áp
-                              ràng buộc vạch liền (m).  None nếu không có vạch liền.
-        n_valid_windows     : Số cửa sổ sliding window có pixel vàng hợp lệ.
-        gap_density         : Tỷ lệ cửa sổ TRỐNG trong tổng cửa sổ (0..1).
-        detect_time_ms      : Thời gian xử lý (ms).
-        debug_bev           : Ảnh BEV nhị phân (uint8 H×W) để debug — None nếu
-                              DEBUG_YELLOW_DRAW = False.
-    """
-    line_type:        LineType          = LineType.NONE
-    poly_coeffs:      Optional[np.ndarray] = None   # [a, b, c]
-    d_yellow_line_m:  Optional[float]      = None
-    road_max_m:       Optional[float]      = None
+    line_type:        LineType             = LineType.NONE   # Loại vạch VÀNG bên trái
+    poly_coeffs:      Optional[np.ndarray] = None
+    d_yellow_line_m:  Optional[float]      = None   # Khoảng cách tâm xe → vạch vàng (m, >= 0)
+    road_min_m:       Optional[float]      = None   # Biên trái tâm xe (hệ đường tham chiếu)
+    road_max_m:       Optional[float]      = None   # Biên phải tâm xe (hệ đường tham chiếu)
+    d_right_line_m:   Optional[float]      = None   # Tâm xe → biên phải hợp pháp (m)
+    right_line_type:  LineType             = LineType.NONE
+    left_line_type:   LineType             = LineType.NONE
+    confidence:       float                = 0.0
+    source:           str                  = "NONE"  # 'CV' | 'MAP' | 'NONE'
+    lines:            List[LaneLine]       = field(default_factory=list)
     n_valid_windows:  int                  = 0
     gap_density:      float                = 1.0
     detect_time_ms:   float                = 0.0
     debug_bev:        Optional[np.ndarray] = None
 
 
-# ==============================================================================
-# CLASS CHÍNH
-# ==============================================================================
-
 class RealtimeYellowLineDetector:
-    """
-    Bộ nhận diện vạch vàng thời gian thực (< 10ms / frame).
+    # Không gian BEV (hệ camera chiếu xuống mặt đất): ngang [-8, +8] m, dọc [2, 20] m trước camera
+    BEV_RES = 0.05          # m / px  (20 px/m)
+    BEV_LAT = 8.0
+    BEV_X_MIN, BEV_X_MAX = 2.0, 20.0
+    LANE_WIDTH_DEFAULT = 3.5
 
-    Thuật toán:
-      • Crop ROI 50% nửa dưới ảnh → chuyển HSV → inRange filter (C++ SIMD).
-      • IPM warp ảnh nhị phân 1-channel sang Bird's Eye View.
-      • Vectorized Sliding Window (NumPy only, không vòng lặp pixel).
-      • Phân loại SOLID / DASHED dựa trên fill ratio & gap density.
-      • Fit đa thức bậc 2 và tính Frenet offset d_yellow_line.
-
-    Parameters:
-        debug_draw  : True để trả về ảnh BEV debug trong result.debug_bev.
-        road_half_w : Nửa chiều rộng đường mặc định (m) — bản sao cục bộ của
-                      DEFAULT_ROAD_HALF_WIDTH_M để tính road_max_m.
-    """
-
-    def __init__(self, debug_draw: bool = False, road_half_w: float = 5.25):
+    def __init__(self, debug_draw: bool = True, road_half_w: float = 5.25, img_w: int = 480, img_h: int = 300):
         self.debug_draw = debug_draw
         self.road_half_w = road_half_w
+        self.img_w, self.img_h = img_w, img_h
+        self.r_clearance = float(EGO_HALF_WIDTH_M + 0.08)       # nửa xe + lề biên đường
+        self.r_clear_yellow = float(EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
 
-        # Tính trước ma trận IPM một lần duy nhất (tránh recompute mỗi frame)
-        self._M: np.ndarray = self._build_ipm_matrix()
-        self._M_inv: np.ndarray = np.linalg.inv(self._M)
+        self.bev_w = int(round(2 * self.BEV_LAT / self.BEV_RES))                       # 320
+        self.bev_h = int(round((self.BEV_X_MAX - self.BEV_X_MIN) / self.BEV_RES))      # 360
+        self._M = self._build_analytic_ipm()
 
-        # Cache thông số sliding window
-        self._n_win:       int = YELLOW_NWIN
-        self._win_margin:  int = YELLOW_WIN_MARGIN_PX
-        self._min_pix:     int = YELLOW_MIN_PIX_PER_WIN
+        self._ema_min: Optional[float] = None
+        self._ema_max: Optional[float] = None
+        self._ema_alpha = 0.35
 
-        # Dải màu HSV vạch vàng (lower / upper bound)
-        self._lower_yellow = np.array([YELLOW_H_LOW,  YELLOW_S_LOW,  YELLOW_V_LOW],  dtype=np.uint8)
-        self._upper_yellow = np.array([YELLOW_H_HIGH, YELLOW_S_HIGH, YELLOW_V_HIGH], dtype=np.uint8)
+        self._lower_y = np.array([YELLOW_H_LOW, YELLOW_S_LOW, YELLOW_V_LOW], np.uint8)
+        self._upper_y = np.array([YELLOW_H_HIGH, 255, 255], np.uint8)
+        self._k_wide = np.ones((1, 16), np.uint8)
+        self._k_dil = np.ones((3, 5), np.uint8)
 
-    # ------------------------------------------------------------------
-    # API CÔNG KHAI
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ IPM
+    def _ground_to_pixel(self, X: float, Y: float) -> Tuple[float, float]:
+        """Điểm mặt đất (X tới trước camera, Y sang phải) → pixel ảnh (mô hình pinhole CARLA)."""
+        f = (self.img_w / 2.0) / math.tan(math.radians(FRONT_CAM_FOV_DEG) / 2.0)
+        cx, cy = self.img_w / 2.0, self.img_h / 2.0
+        th = math.radians(-FRONT_CAM_PITCH_DEG)   # góc chúc xuống (dương)
+        h = FRONT_CAM_Z_M
+        depth = X * math.cos(th) + h * math.sin(th)
+        up = X * math.sin(th) - h * math.cos(th)
+        return cx + f * Y / depth, cy - f * up / depth
 
-    def detect(
-        self,
-        rgb_frame: Optional[np.ndarray] = None,
-        ego_vehicle=None,
-        carla_map=None,
-        ref_xy: Optional[Tuple[float, float]] = None
-    ) -> YellowLineResult:
-        """
-        Nhận diện vạch vàng thời gian thực (Camera RGB + CARLA Map Waypoint Ground Truth).
-        Tối ưu tuyệt đối cho vạch đôi nét liền màu vàng (Double Solid Yellow Line) trong CARLA.
+    def _ground_to_bev(self, X: float, Y: float) -> Tuple[float, float]:
+        return (Y + self.BEV_LAT) / self.BEV_RES, (self.BEV_X_MAX - X) / self.BEV_RES
 
-        Args:
-            rgb_frame: Ảnh RGB shape (H, W, 3) hoặc None.
-            ego_vehicle: Actor xe Ego trong CARLA (tùy chọn để lấy vị trí chính xác).
-            carla_map: Bản đồ CARLA (tùy chọn để truy vấn vạch kẻ OpenDRIVE).
-            ref_xy: Tọa độ (x_ref, y_ref) của quỹ đạo tham chiếu tại vị trí hiện tại (giữ cố định
-                    làn gốc ngay cả khi xe đang lách sang làn phải để né vật cản).
+    def _build_analytic_ipm(self) -> np.ndarray:
+        pts_g = [(4.0, -2.0), (4.0, 2.0), (16.0, 2.0), (16.0, -2.0)]
+        src = np.float32([self._ground_to_pixel(X, Y) for X, Y in pts_g])
+        dst = np.float32([self._ground_to_bev(X, Y) for X, Y in pts_g])
+        return cv2.getPerspectiveTransform(src, dst)
 
-        Returns:
-            YellowLineResult chứa trạng thái vạch vàng và giới hạn hành lang lái xe.
-        """
+    def _bev_col_to_lat(self, col: float) -> float:
+        return col * self.BEV_RES - self.BEV_LAT
+
+    def _bev_row_to_x(self, row: float) -> float:
+        return self.BEV_X_MAX - row * self.BEV_RES
+
+    # ------------------------------------------------------------------ API
+    def detect(self, rgb_frame: Optional[np.ndarray] = None, ego_vehicle=None, carla_map=None,
+               ref_xy: Optional[Tuple[float, float]] = None, ref_theta: Optional[float] = None) -> YellowLineResult:
         t0 = time.perf_counter()
         result = YellowLineResult()
 
-        if rgb_frame is not None:
-            # Step 1: ROI Crop + HSV Masking
-            binary_roi = self._hsv_yellow_mask(rgb_frame)
-
-            # Step 2: IPM → Bird's Eye View (chỉ warp ảnh nhị phân 1-channel)
-            bev = cv2.warpPerspective(
-                binary_roi,
-                self._M,
-                (IPM_BEV_WIDTH, IPM_BEV_HEIGHT),
-                flags=cv2.INTER_NEAREST
-            )
-
-            # Step 3: Vectorized Sliding Window
-            result = self._sliding_window(bev)
-
-            if self.debug_draw:
-                result.debug_bev = bev
-
-        # HỖ TRỢ BẢO ĐẢM AN TOÀN TUYỆT ĐỐI VỚI CARLA MAP GROUND TRUTH:
-        # Nhận diện vạch đôi nét liền màu vàng (SolidSolid / Solid) hoặc nét đứt bên trái làn tham chiếu
-        if ego_vehicle is not None and carla_map is not None:
+        # Độ lệch ngang của xe so với đường tham chiếu (để quy đổi offset CV từ hệ thân xe → hệ Frenet)
+        d_ego_ref = 0.0
+        if ego_vehicle is not None and ref_xy is not None:
             try:
-                import carla
-                ego_loc = ego_vehicle.get_location()
-                if ref_xy is not None:
-                    query_loc = carla.Location(x=float(ref_xy[0]), y=float(ref_xy[1]), z=ego_loc.z)
-                else:
-                    query_loc = ego_loc
-
-                wp = carla_map.get_waypoint(query_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-
-                # Nếu không truyền ref_xy và xe đang tạm lách sang làn bên phải để né vật cản,
-                # kiểm tra làn cùng chiều bên trái để không bị mất dấu vạch vàng tim đường
-                if wp is not None and hasattr(wp, 'left_lane_marking'):
-                    if wp.left_lane_marking.color != carla.LaneMarkingColor.Yellow and hasattr(wp, 'get_left_lane'):
-                        wp_left = wp.get_left_lane()
-                        if (wp_left is not None
-                                and wp_left.lane_type == carla.LaneType.Driving
-                                and (wp_left.lane_id * wp.lane_id > 0)
-                                and hasattr(wp_left, 'left_lane_marking')
-                                and wp_left.left_lane_marking.color == carla.LaneMarkingColor.Yellow):
-                            wp = wp_left
-
-                if wp is not None and hasattr(wp, 'left_lane_marking'):
-                    lm = wp.left_lane_marking
-                    is_yellow = (lm.color == carla.LaneMarkingColor.Yellow)
-                    is_solid = lm.type in (
-                        carla.LaneMarkingType.Solid,
-                        carla.LaneMarkingType.SolidSolid,
-                        carla.LaneMarkingType.SolidBroken
-                    )
-                    is_broken = lm.type in (
-                        carla.LaneMarkingType.Broken,
-                        carla.LaneMarkingType.BrokenSolid,
-                        carla.LaneMarkingType.BrokenBroken
-                    )
-
-                    wp_loc = wp.transform.location
-                    wp_yaw = math.radians(wp.transform.rotation.yaw)
-                    # Trong hệ CARLA/Unreal: nx = -sin(yaw), ny = cos(yaw) chỉ sang PHẢI làn đường
-                    nx = -math.sin(wp_yaw)
-                    ny = math.cos(wp_yaw)
-
-                    # Độ lệch ngang của xe so với tim làn tham chiếu (d_lat_ego):
-                    # d_lat_ego > 0: xe lệch sang PHẢI (xa vạch vàng)
-                    # d_lat_ego < 0: xe lệch sang TRÁI (tiến sát vạch vàng)
-                    d_lat_ego = nx * (ego_loc.x - wp_loc.x) + ny * (ego_loc.y - wp_loc.y)
-
-                    # Vạch vàng bên trái nằm ở d_yellow = -d_lane_half (thường là -1.75m)
-                    d_lane_half = float(wp.lane_width / 2.0)
-                    d_yellow_line = -d_lane_half
-
-                    # Khoảng cách thực tế thời gian thực từ tâm xe tới vạch vàng:
-                    # d_actual = d_lat_ego - d_yellow_line = d_lat_ego + d_lane_half
-                    d_actual_to_yellow = max(0.0, d_lat_ego + d_lane_half)
-
-                    if is_yellow and is_solid:
-                        result.line_type = LineType.SOLID
-                        result.d_yellow_line_m = float(d_actual_to_yellow)
-
-                        # Giới hạn an toàn cận dưới road_min (đảm bảo sườn xe cách vạch vàng ít nhất YELLOW_LINE_CLEARANCE_M):
-                        # r_clear = 1.0m (nửa xe) + 0.35m (clearance) = 1.35m
-                        # road_min = d_yellow_line + r_clear = -1.75 + 1.35 = -0.40m
-                        r_clear = EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M
-                        result.road_max_m = d_yellow_line + r_clear   # giá trị âm (ví dụ: -0.40m)
-                    elif is_yellow and is_broken:
-                        result.line_type = LineType.DASHED
-                        result.d_yellow_line_m = float(d_actual_to_yellow)
-                        result.road_max_m = None
-                    else:
-                        # Không có vạch vàng bên trái làn đường -> xóa tránh nhiễu màu vàng từ marker vật cản
-                        result.line_type = LineType.NONE
-                        result.d_yellow_line_m = None
-                        result.road_max_m = None
+                tf = ego_vehicle.get_transform()
+                th = float(ref_theta) if ref_theta is not None else math.radians(tf.rotation.yaw)
+                d_ego_ref = -math.sin(th) * (tf.location.x - ref_xy[0]) + math.cos(th) * (tf.location.y - ref_xy[1])
             except Exception:
-                pass
+                d_ego_ref = 0.0
 
-        detect_ms = (time.perf_counter() - t0) * 1000.0
-        result.detect_time_ms = detect_ms
-        return result
+        if rgb_frame is not None:
+            try:
+                result = self._process_camera_frame(rgb_frame, d_ego_ref)
+            except Exception as e:
+                print(f"\n[CV LANE] Lỗi xử lý frame: {e}")
+                result = YellowLineResult()
 
-    # ------------------------------------------------------------------
-    # BƯỚC 1: HSV MASKING
-    # ------------------------------------------------------------------
+        if result.confidence < 0.5 and ego_vehicle is not None and carla_map is not None:
+            self._map_fallback(result, ego_vehicle, carla_map, ref_xy)
 
-    def _hsv_yellow_mask(self, rgb_frame: np.ndarray) -> np.ndarray:
-        """
-        Crop 50% nửa dưới ảnh RGB, chuyển sang HSV, lọc màu vàng.
-
-        Returns:
-            binary_roi: Mảng uint8 (H_crop × W) — 255 = pixel vàng, 0 = nền.
-        """
-        h, w = rgb_frame.shape[:2]
-
-        # Crop 50% nửa dưới (vùng mặt đường)
-        roi = rgb_frame[h // 2:, :]                         # (H/2, W, 3)
-
-        # Chuyển BGR/RGB → HSV (OpenCV C++ SIMD, không cần thêm bước LAB)
-        # CARLA camera trả về BGRA → cần xử lý alpha nếu có
-        if roi.shape[2] == 4:
-            roi = roi[:, :, :3]                             # Bỏ kênh alpha
-
-        hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)          # (H/2, W, 3)
-
-        # Lọc dải màu vàng — cv2.inRange chạy C++ SIMD (vectorized tự động)
-        mask = cv2.inRange(hsv, self._lower_yellow, self._upper_yellow)  # uint8
-
-        # Chuẩn hóa kích thước mask ROI về đúng không gian tham chiếu của ma trận IPM (1000 × 450)
-        # khi nhận ảnh trực tiếp từ Front View (Hood-Cam 480 × 300)
-        target_roi_w = CAM_IMAGE_WIDTH
-        target_roi_h = CAM_IMAGE_HEIGHT // 2
-        if mask.shape[1] != target_roi_w or mask.shape[0] != target_roi_h:
-            mask = cv2.resize(mask, (target_roi_w, target_roi_h), interpolation=cv2.INTER_NEAREST)
-
-        return mask  # Shape (CAM_IMAGE_HEIGHT/2, CAM_IMAGE_WIDTH)
-
-    # ------------------------------------------------------------------
-    # BƯỚC 2: IPM matrix
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_ipm_matrix() -> np.ndarray:
-        """
-        Xây dựng ma trận IPM 3×3 từ cấu hình camera CARLA tiêu chuẩn.
-
-        Điểm src được định nghĩa trong không gian ROI (nửa dưới ảnh),
-        điểm dst là góc ảnh BEV đầu ra.
-        """
-        src = np.float32(IPM_SRC_POINTS)
-        dst = np.float32(IPM_DST_POINTS)
-        M = cv2.getPerspectiveTransform(src, dst)
-        return M
-
-    # ------------------------------------------------------------------
-    # BƯỚC 3: VECTORIZED SLIDING WINDOW
-    # ------------------------------------------------------------------
-
-    def _sliding_window(self, bev: np.ndarray) -> YellowLineResult:
-        """
-        Thuật toán Sliding Window Vectorized (NumPy) trên ảnh BEV nhị phân.
-
-        Chiến lược:
-          • Histogram 1D tích lũy → tìm peak gốc vạch.
-          • Chia chiều cao BEV thành N_WIN cửa sổ chồng nhau.
-          • Mỗi cửa sổ: dùng np.nonzero() + Boolean indexing để lấy tọa độ
-            pixel vàng (TUYỆT ĐỐI không dùng vòng lặp Python từng pixel).
-          • Phân loại SOLID / DASHED → fit poly bậc 2 → tính Frenet offset.
-
-        Returns:
-            YellowLineResult (chưa có detect_time_ms — sẽ được gán ngoài).
-        """
-        H, W = bev.shape
-        result = YellowLineResult()
-
-        # ----------------------------------------------------------------
-        # 3a. Tìm gốc vạch bằng histogram nửa trái BEV
-        # ----------------------------------------------------------------
-        # Tổng pixel vàng theo từng cột (axis=0), chỉ lấy nửa dưới BEV
-        half_h = H // 2
-        histogram = np.sum(bev[half_h:, :], axis=0)    # shape (W,)
-
-        # Tìm peak trong vùng bên trái (vạch vàng phân làn ngược chiều nằm bên trái làn xe)
-        left_half  = histogram[:W // 2]
-        right_half = histogram[W // 2:]
-
-        left_base  = int(np.argmax(left_half))
-        right_base = int(np.argmax(right_half)) + W // 2
-
-        # Ưu tiên nửa trái BEV để tránh nhầm lẫn với marker/vật cản màu vàng cam bên phải làn
-        if histogram[left_base] >= self._min_pix * 2:
-            base_x = left_base
-        elif histogram[right_base] >= self._min_pix * 2:
-            base_x = right_base
-        else:
-            result.line_type = LineType.NONE
-            return result
-
-        # ----------------------------------------------------------------
-        # 3b. Sliding Window Vectorized
-        # ----------------------------------------------------------------
-        win_height = H // self._n_win    # Chiều cao mỗi cửa sổ (pixels)
-
-        # Lấy TẤT CẢ tọa độ pixel vàng trong BEV một lần (vectorized)
-        all_nz_y, all_nz_x = np.nonzero(bev)   # shape (N_pixels,) each
-
-        cur_x  = base_x
-        all_good_x: list[np.ndarray] = []   # Danh sách mảng x-coords mỗi win
-        all_good_y: list[np.ndarray] = []   # Danh sách mảng y-coords mỗi win
-        valid_win_flags: list[bool] = []     # True nếu cửa sổ có đủ pixel
-
-        for win_idx in range(self._n_win):
-            # Biên cửa sổ theo chiều dọc (y tăng từ trên xuống dưới)
-            y_low  = H - (win_idx + 1) * win_height
-            y_high = H - win_idx * win_height
-
-            # Boolean mask trên mảng tọa độ toàn BEV (vectorized, không loop)
-            mask_y = (all_nz_y >= y_low) & (all_nz_y < y_high)
-            mask_x = (all_nz_x >= cur_x - self._win_margin) & \
-                     (all_nz_x <  cur_x + self._win_margin)
-            mask_win = mask_y & mask_x
-
-            win_x = all_nz_x[mask_win]
-            win_y = all_nz_y[mask_win]
-
-            has_pixels = len(win_x) >= self._min_pix
-            valid_win_flags.append(has_pixels)
-
-            if has_pixels:
-                all_good_x.append(win_x)
-                all_good_y.append(win_y)
-                # Cập nhật tâm cửa sổ cho bước tiếp (mean shift)
-                cur_x = int(np.mean(win_x))
-
-        n_valid = int(np.sum(valid_win_flags))
-        n_total = self._n_win
-
-        result.n_valid_windows = n_valid
-
-        # ----------------------------------------------------------------
-        # 3c. Phân loại SOLID / DASHED / NONE
-        # ----------------------------------------------------------------
-        if n_valid == 0:
-            result.line_type = LineType.NONE
-            return result
-
-        fill_ratio = n_valid / n_total
-
-        # Tính gap density: tỷ lệ cửa sổ TRỐNG
-        gap_density = 1.0 - fill_ratio
-        result.gap_density = gap_density
-
-        # Kiểm tra phân bổ khoảng trống (gap) xen kẽ (đặc trưng vạch đứt)
-        consecutive_empty = self._count_max_consecutive_false(valid_win_flags)
-
-        if fill_ratio >= YELLOW_SOLID_FILL_RATIO:
-            line_type = LineType.SOLID
-        elif gap_density >= YELLOW_DASHED_GAP_RATIO and consecutive_empty >= 2:
-            # Vạch đứt: có khoảng trống lớn xen kẽ đặc trưng (≥2 cửa sổ liên tiếp trống)
-            line_type = LineType.DASHED
-        elif fill_ratio >= 0.35:
-            # Ít pixel nhưng không đủ đứt rõ → coi là DASHED (phủ thêm)
-            line_type = LineType.DASHED
-        else:
-            line_type = LineType.NONE
-
-        result.line_type = line_type
-        if line_type == LineType.NONE:
-            return result
-
-        # ----------------------------------------------------------------
-        # 3d. Fit đa thức bậc 2 trong BEV: x = a*y² + b*y + c
-        # ----------------------------------------------------------------
-        if all_good_x:
-            pts_x = np.concatenate(all_good_x)   # Tất cả x-coords hợp lệ
-            pts_y = np.concatenate(all_good_y)   # Tất cả y-coords hợp lệ
-
-            # np.polyfit chạy trên NumPy C-backend — đủ nhanh với ~200-800 pts
-            if len(pts_x) >= 3:
-                try:
-                    coeffs = np.polyfit(pts_y, pts_x, 2)   # [a, b, c]
-                    result.poly_coeffs = coeffs
-                except np.linalg.LinAlgError:
-                    result.poly_coeffs = None
-
-        # ----------------------------------------------------------------
-        # 3e. Tính khoảng cách ngang thực tế d_yellow_line_m (m, >= 0)
-        # ----------------------------------------------------------------
-        d_m = self._compute_frenet_offset(result.poly_coeffs, bev.shape)
-        result.d_yellow_line_m = d_m
-
-        # ----------------------------------------------------------------
-        # 3f. Tính road_max_m (giới hạn biên trái road_min cho vạch SOLID trong MPC)
-        # ----------------------------------------------------------------
-        if line_type == LineType.SOLID and d_m is not None:
-            r_clearance = EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M
-            # HỆ TỌA ĐỘ CARLA FRENET: d < 0 là BÊN TRÁI (vạch đôi vàng nét liền ở d = -1.75m),
-            # d > 0 là BÊN PHẢI. Giới hạn biên trái của tâm xe: road_min = -1.75 + r_clearance = -0.40m
-            result.road_max_m = -1.75 + r_clearance
-
-        return result
-
-    # ------------------------------------------------------------------
-    # HÀM PHỤ TRỢ NỘI BỘ
-    # ------------------------------------------------------------------
-
-    def _compute_frenet_offset(
-        self,
-        poly_coeffs: Optional[np.ndarray],
-        bev_shape: Tuple[int, int]
-    ) -> Optional[float]:
-        """
-        Tính khoảng cách ngang thực tế (m, >= 0) từ tâm xe (đáy ảnh BEV) tới vạch vàng bên trái.
-
-        Trong BEV:
-          • y = H-1 tương ứng với vị trí ngay trước đầu xe.
-          • Trục x ngang: x < W/2 → vạch nằm bên trái tâm xe.
-
-        Args:
-            poly_coeffs : [a, b, c] từ np.polyfit(y, x, 2), hoặc None.
-            bev_shape   : (H, W) của ảnh BEV.
-
-        Returns:
-            d_m: float (m, >= 0) hoặc None nếu không tính được.
-        """
-        if poly_coeffs is None:
-            return None
-
-        H, W = bev_shape
-        a, b, c = poly_coeffs
-
-        # Vị trí x của vạch tại y = H-1 (gần mũi xe nhất)
-        y_ego = float(H - 1)
-        x_line_px = a * y_ego**2 + b * y_ego + c
-
-        # Tâm xe ở cột W/2 trong BEV
-        x_ego_px = float(W) / 2.0
-
-        # Khoảng cách ngang từ tâm xe tới vạch vàng bên trái (luôn >= 0m, đồng nhất với Ground Truth)
-        dx_px = x_line_px - x_ego_px
-        if dx_px > 40.0:
-            # Nếu vạch nằm hẳn sang bên phải mũi xe trong BEV -> không phải vạch vàng tim đường bên trái
-            return None
-        dist_m = max(0.0, -dx_px * BEV_METERS_PER_PIXEL_X)
-        return float(dist_m)
-
-    @staticmethod
-    def _count_max_consecutive_false(flags: list[bool]) -> int:
-        """
-        Đếm số cửa sổ TRỐNG (False) liên tiếp dài nhất trong danh sách.
-        Dùng để phân biệt vạch đứt (nhiều khoảng trống liên tiếp xen kẽ).
-        """
-        max_run = 0
-        cur_run = 0
-        for f in flags:
-            if not f:
-                cur_run += 1
-                if cur_run > max_run:
-                    max_run = cur_run
+        if result.road_min_m is not None and result.road_max_m is not None:
+            result.road_min_m = min(result.road_min_m, -0.45)
+            result.road_max_m = max(result.road_max_m, 0.45)
+            if self._ema_min is None or abs(result.road_min_m - self._ema_min) > 2.5:
+                self._ema_min = result.road_min_m   # nhảy làn thật → reset EMA, không trễ
             else:
-                cur_run = 0
-        return max_run
+                self._ema_min += self._ema_alpha * (result.road_min_m - self._ema_min)
+            if self._ema_max is None or abs(result.road_max_m - self._ema_max) > 2.5:
+                self._ema_max = result.road_max_m
+            else:
+                self._ema_max += self._ema_alpha * (result.road_max_m - self._ema_max)
+            result.road_min_m, result.road_max_m = float(self._ema_min), float(self._ema_max)
 
-    # ------------------------------------------------------------------
-    # API DEBUG / VISUALIZATION
-    # ------------------------------------------------------------------
+        result.detect_time_ms = (time.perf_counter() - t0) * 1000.0
+        return result
 
-    def draw_debug_overlay(
-        self,
-        rgb_frame: np.ndarray,
-        result: YellowLineResult
-    ) -> np.ndarray:
-        """
-        Vẽ overlay thông tin nhận diện lên ảnh RGB gốc (cho debug HUD).
+    # ------------------------------------------------------------------ CV CORE
+    def _process_camera_frame(self, rgb_frame: np.ndarray, d_ego_ref: float = 0.0) -> YellowLineResult:
+        result = YellowLineResult()
+        frame = rgb_frame[:, :, :3]
+        if frame.shape[1] != self.img_w or frame.shape[0] != self.img_h:
+            frame = cv2.resize(frame, (self.img_w, self.img_h))
 
-        Returns:
-            Ảnh RGB có chú thích (cùng shape với đầu vào).
-        """
-        out = rgb_frame.copy()
-        h, w = out.shape[:2]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+        mask_y = cv2.inRange(hsv, self._lower_y, self._upper_y)
+        # Trắng: sáng hơn hẳn nhựa đường (ngưỡng thích ứng theo median vùng đường), ít màu, không phải vàng
+        road_v = float(np.median(hsv[int(self.img_h * 0.75):, int(self.img_w * 0.35):int(self.img_w * 0.65), 2]))
+        v_th = max(WHITE_V_LOW, road_v + 45.0)
+        mask_w = ((hsv[:, :, 2] >= v_th) & (hsv[:, :, 1] <= WHITE_S_HIGH) & (mask_y == 0)).astype(np.uint8) * 255
+        # Chỉ xét phần dưới đường chân trời
+        horizon = int(self._ground_to_pixel(self.BEV_X_MAX, 0.0)[1]) - 2
+        mask_y[:max(0, horizon)] = 0
+        mask_w[:max(0, horizon)] = 0
 
-        # Màu theo loại vạch
-        color_map = {
-            LineType.NONE:   (128, 128, 128),
-            LineType.DASHED: (0, 220, 255),
-            LineType.SOLID:  (0, 60, 255),
-        }
-        color = color_map[result.line_type]
+        bev_y = cv2.warpPerspective(mask_y, self._M, (self.bev_w, self.bev_h), flags=cv2.INTER_NEAREST)
+        bev_w = cv2.warpPerspective(mask_w, self._M, (self.bev_w, self.bev_h), flags=cv2.INTER_NEAREST)
 
-        # Text trạng thái
-        label = (
-            f"YELLOW LINE: {result.line_type.value} | "
-            f"d={result.d_yellow_line_m:.2f}m | "
-            f"valid_win={result.n_valid_windows}/{YELLOW_NWIN} | "
-            f"{result.detect_time_ms:.1f}ms"
-        ) if result.d_yellow_line_m is not None else (
-            f"YELLOW LINE: {result.line_type.value} | {result.detect_time_ms:.1f}ms"
-        )
+        lines = self._find_lines(bev_y, 'yellow') + self._find_lines(bev_w, 'white')
+        # Gộp vạch trùng vị trí (vạch đôi / vàng chồng trắng) — ưu tiên vàng, rồi liền
+        lines.sort(key=lambda l: l.d_ego_m)
+        merged: List[LaneLine] = []
+        for ln in lines:
+            if merged and abs(ln.d_ego_m - merged[-1].d_ego_m) < 0.55:
+                a = merged[-1]
+                keep = a if (a.color == 'yellow') > (ln.color == 'yellow') or \
+                    ((a.color == ln.color) and a.fill_ratio >= ln.fill_ratio) else ln
+                merged[-1] = keep
+            else:
+                merged.append(ln)
+        result.lines = merged
 
-        cv2.putText(out, label, (10, h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+        # Phát hiện lưới vạch vàng ô mắt cáo trong giao lộ (nhiều vạch vàng song song hoặc vạch vàng bên phải)
+        n_yellow = sum(1 for l in merged if l.color == 'yellow')
+        if n_yellow >= 2 or any(l.color == 'yellow' and l.d_ego_m > 0.5 for l in merged):
+            result.confidence = 0.0
+            return result
 
-        # Vẽ đường fit đa thức trong ROI nếu có (chiếu từ BEV về image)
-        if result.poly_coeffs is not None:
-            self._draw_poly_on_roi(out, result.poly_coeffs)
+        left = sorted([l for l in merged if l.d_ego_m < 0], key=lambda l: -l.d_ego_m)   # gần → xa
+        right = sorted([l for l in merged if l.d_ego_m > 0], key=lambda l: l.d_ego_m)
 
+        # Vạch vàng gần nhất bên trái
+        yl = next((l for l in left if l.color == 'yellow'), None)
+        if yl is not None:
+            result.line_type = yl.line_type if yl.line_type != LineType.NONE else LineType.SOLID
+            result.d_yellow_line_m = float(-yl.d_ego_m)
+
+        # Biên trái: đi ra ngoài qua vạch trắng ĐỨT; dừng ở vạch vàng hoặc vạch LIỀN
+        left_bound, left_kind = self._walk_out(left, sign=-1)
+        right_bound, right_kind = self._walk_out(right, sign=+1)
+        result.left_line_type = left[0].line_type if left else LineType.NONE
+        result.right_line_type = LineType.SOLID if right_kind in ('solid', 'yellow') else (
+            LineType.DASHED if right_kind == 'assumed' else LineType.NONE)
+
+        # Độ tin cậy: thấy được vạch biên làn hiện tại ở cả 2 phía (kể cả khi xe đang đè giữa 2 làn ~3.5 m)
+        has_l = bool(left) and -left[0].d_ego_m < 3.8
+        has_r = bool(right) and right[0].d_ego_m < 3.8
+        result.confidence = 1.0 if (has_l and has_r) else (0.4 if (has_l or has_r) else 0.0)
+
+        if result.confidence >= 0.5 and left_bound is not None and right_bound is not None:
+            clr_l = self.r_clear_yellow if left_kind == 'yellow' else self.r_clearance
+            # Quy đổi từ hệ thân xe → hệ đường tham chiếu: d_ref = d_ego + d_ego_ref
+            result.road_min_m = float(left_bound + clr_l + d_ego_ref)
+            result.road_max_m = float(right_bound - self.r_clearance + d_ego_ref)
+            result.d_right_line_m = float(right_bound)
+            result.source = 'CV'
+
+        if self.debug_draw:
+            dbg = np.zeros((self.bev_h, self.bev_w, 3), np.uint8)
+            dbg[bev_w > 0] = (255, 255, 255)
+            dbg[bev_y > 0] = (255, 220, 0)
+            cx = int(self._ground_to_bev(0, 0)[0])
+            cv2.line(dbg, (cx, 0), (cx, self.bev_h), (255, 0, 0), 1)
+            for ln in merged:
+                c = int(round((ln.d_ego_m + self.BEV_LAT) / self.BEV_RES))
+                col = (255, 160, 0) if ln.color == 'yellow' else (0, 200, 255)
+                cv2.line(dbg, (c, self.bev_h - 12), (c, self.bev_h - 1), col, 3)
+            if result.road_min_m is not None:
+                for d in (result.road_min_m - d_ego_ref, result.road_max_m - d_ego_ref):
+                    c = int(round((d + self.BEV_LAT) / self.BEV_RES))
+                    cv2.line(dbg, (c, 0), (c, self.bev_h), (0, 255, 0), 1)
+            result.debug_bev = dbg
+        return result
+
+    def _walk_out(self, side: List[LaneLine], sign: int) -> Tuple[Optional[float], str]:
+        """Đi từ tim xe ra ngoài; trả về (vị trí biên hợp pháp theo hệ thân xe, loại biên)."""
+        if not side:
+            return None, 'none'
+        prev = 0.0
+        for ln in side:
+            if abs(ln.d_ego_m - prev) > self.LANE_WIDTH_DEFAULT + 1.5 and prev != 0.0:
+                # Khoảng trống quá lớn giữa 2 vạch (mất vạch) → dừng ở 1 làn chuẩn sau vạch đứt cuối
+                return prev + sign * self.LANE_WIDTH_DEFAULT, 'assumed'
+            if ln.color == 'yellow':
+                return ln.d_ego_m, 'yellow'
+            if ln.line_type == LineType.SOLID:
+                return ln.d_ego_m, 'solid'
+            prev = ln.d_ego_m
+        # Vạch ngoài cùng nhìn thấy là vạch ĐỨT → còn 1 làn cùng chiều phía sau (ngoài tầm nhìn)
+        far = prev + sign * self.LANE_WIDTH_DEFAULT
+        if abs(far) > self.BEV_LAT - 0.5:
+            far = sign * (self.BEV_LAT - 0.5)
+        return far, 'assumed'
+
+    def _find_lines(self, bev: np.ndarray, color: str) -> List[LaneLine]:
+        """Histogram vùng gần → các chân vạch; sliding window có bám độ dốc → vị trí + tỷ lệ lấp đầy theo hàng."""
+        H, W = bev.shape
+        # Loại bỏ vạch dừng ngang / tường trắng rộng (>= 0.8 m theo phương ngang)
+        wide = cv2.dilate(cv2.morphologyEx(bev, cv2.MORPH_OPEN, self._k_wide), self._k_dil)
+        bev_clean = cv2.subtract(bev, wide)
+
+        r_near0 = int((self.BEV_X_MAX - 10.5) / self.BEV_RES)   # dải 2.5..10.5 m trước camera
+        r_near1 = int((self.BEV_X_MAX - 2.5) / self.BEV_RES)
+        hist = np.count_nonzero(bev_clean[r_near0:r_near1], axis=0).astype(np.float32)
+        hist = np.convolve(hist, np.ones(7, np.float32) / 7, mode='same')
+        min_peak = 6.0
+        peaks = []
+        sep = int(0.8 / self.BEV_RES)
+        h2 = hist.copy()
+        while True:
+            c = int(np.argmax(h2))
+            if h2[c] < min_peak:
+                break
+            peaks.append(c)
+            h2[max(0, c - sep):c + sep] = 0
+
+        nz_r, nz_c = np.nonzero(bev_clean)
+        n_win = 18
+        win_h = H // n_win
+        margin = int(0.35 / self.BEV_RES)
+        out: List[LaneLine] = []
+        for base in peaks:
+            cur = float(base)
+            step = 0.0
+            xs, ys = [], []
+            for k in range(n_win):
+                r1 = H - k * win_h
+                r0 = r1 - win_h
+                m = (nz_r >= r0) & (nz_r < r1) & (np.abs(nz_c - cur) <= margin)
+                if np.count_nonzero(m) >= 3:
+                    mc = float(np.mean(nz_c[m]))
+                    if xs:
+                        step = 0.4 * step + 0.6 * float(np.clip(mc - (cur - step), -5.0, 5.0))
+                    cur = mc + step
+                    xs.append(nz_c[m]); ys.append(nz_r[m])
+                else:
+                    step *= 0.5
+                    cur += step
+            if len(xs) < 3:
+                continue
+            xs_a, ys_a = np.concatenate(xs), np.concatenate(ys)
+            x_min = self._bev_row_to_x(float(np.max(ys_a)))
+            x_max = self._bev_row_to_x(float(np.min(ys_a)))
+            if x_min > 8.5 or (x_max - x_min) < 4.5:
+                continue
+            poly = np.poly1d(np.polyfit(ys_a, xs_a, 1))
+            if np.std(xs_a - poly(ys_a)) > 0.32 / self.BEV_RES:
+                continue
+            # Tỷ lệ lấp đầy theo từng hàng dọc theo vạch để phân biệt chuẩn xác vạch LIỀN và vạch ĐỨT
+            r_span = np.arange(int(np.min(ys_a)), int(np.max(ys_a)) + 1)
+            c_pred = np.clip(np.round(poly(r_span)).astype(int), 6, W - 7)
+            row_hit = [bool(np.any(bev_clean[rr, cc - 6:cc + 7] > 0)) for rr, cc in zip(r_span, c_pred)]
+            fill = float(np.sum(row_hit)) / float(H)
+            if fill < 0.22:
+                continue
+            # Ngoại suy tuyến tính vùng gần về vị trí tâm xe (sau camera FRONT_CAM_X_M)
+            near = self._bev_row_to_x(ys_a) < 11.0
+            fit_c = np.polyfit(self._bev_row_to_x(ys_a[near] if near.sum() > 10 else ys_a),
+                               xs_a[near] if near.sum() > 10 else xs_a, 1)
+            col_at_ego = np.polyval(fit_c, -FRONT_CAM_X_M)
+            d = float(self._bev_col_to_lat(col_at_ego))
+            ltype = LineType.SOLID if fill >= 0.68 else LineType.DASHED
+            out.append(LaneLine(d, color, ltype, fill))
         return out
 
-    def _draw_poly_on_roi(self, frame: np.ndarray, coeffs: np.ndarray) -> None:
-        """
-        Chiếu đường fit BEV ngược về ảnh gốc và vẽ.
-        Dùng M_inv để unproject các điểm trên đường cong.
-        """
-        H_bev = IPM_BEV_HEIGHT
-        W_bev = IPM_BEV_WIDTH
-        H_img = frame.shape[0]
+    # ------------------------------------------------------------------ MAP FALLBACK
+    def _map_fallback(self, result: YellowLineResult, ego_vehicle, carla_map, ref_xy):
+        try:
+            import carla
+            ego_loc = ego_vehicle.get_location()
+            q = carla.Location(x=float(ref_xy[0]), y=float(ref_xy[1]), z=ego_loc.z) if ref_xy is not None else ego_loc
+            wp0 = carla_map.get_waypoint(q, project_to_road=True, lane_type=carla.LaneType.Driving)
+            if wp0 is None:
+                return
+            solid = (carla.LaneMarkingType.Solid, carla.LaneMarkingType.SolidSolid, carla.LaneMarkingType.SolidBroken)
+            d_left = -wp0.lane_width / 2.0
+            wp, is_yel, yel_solid = wp0, False, False
+            while True:
+                lm = wp.left_lane_marking
+                if lm and lm.color == carla.LaneMarkingColor.Yellow:
+                    is_yel, yel_solid = True, lm.type in solid
+                    break
+                nl = wp.get_left_lane()
+                if nl is not None and nl.lane_type == carla.LaneType.Driving and nl.lane_id * wp0.lane_id > 0:
+                    d_left -= nl.lane_width
+                    wp = nl
+                else:
+                    break
+            d_right = wp0.lane_width / 2.0
+            wp = wp0
+            while True:
+                nr = wp.get_right_lane()
+                if nr is not None and nr.lane_type == carla.LaneType.Driving and nr.lane_id * wp0.lane_id > 0:
+                    d_right += nr.lane_width
+                    wp = nr
+                else:
+                    break
+            yaw = math.radians(wp0.transform.rotation.yaw)
+            loc = wp0.transform.location
+            d_lat_ego = -math.sin(yaw) * (ego_loc.x - loc.x) + math.cos(yaw) * (ego_loc.y - loc.y)
 
-        a, b, c = coeffs
-        pts_bev = []
-        for y_b in range(H_bev // 4, H_bev, H_bev // 20):
-            x_b = a * y_b**2 + b * y_b + c
-            pts_bev.append([x_b, float(y_b)])
+            clr_l = self.r_clear_yellow if (is_yel and yel_solid) else self.r_clearance
+            result.road_min_m = float(d_left + clr_l)
+            result.road_max_m = float(d_right - self.r_clearance)
+            result.d_right_line_m = float(d_right - d_lat_ego)
+            if is_yel:
+                result.line_type = LineType.SOLID if yel_solid else LineType.DASHED
+                result.d_yellow_line_m = float(max(0.0, d_lat_ego - d_left))
+            result.source = 'MAP'
+        except Exception:
+            pass
 
-        if not pts_bev:
-            return
-
-        # Unproject BEV → ROI image (M_inv)
-        bev_arr = np.array(pts_bev, dtype=np.float32).reshape(-1, 1, 2)
-        roi_arr = cv2.perspectiveTransform(bev_arr, self._M_inv)
-
-        h_frame = frame.shape[0]
-        roi_offset_y = h_frame // 2  # ROI bắt đầu từ giữa ảnh
-
-        pts_img = []
-        for pt in roi_arr.reshape(-1, 2):
-            xi = int(pt[0])
-            yi = int(pt[1]) + roi_offset_y
-            if 0 <= xi < frame.shape[1] and roi_offset_y <= yi < h_frame:
-                pts_img.append((xi, yi))
-
-        for i in range(len(pts_img) - 1):
-            cv2.line(frame, pts_img[i], pts_img[i + 1], (0, 255, 100), 2, cv2.LINE_AA)
-
+    # ------------------------------------------------------------------ HUD
+    def draw_debug_overlay(self, rgb_frame: np.ndarray, result: YellowLineResult) -> np.ndarray:
+        out = rgb_frame.copy()
+        h, w = out.shape[:2]
+        rm = f"{result.road_min_m:+.2f}" if result.road_min_m is not None else "N/A"
+        rx = f"{result.road_max_m:+.2f}" if result.road_max_m is not None else "N/A"
+        txt = f"{result.source} CORRIDOR [{rm};{rx}] Y={result.line_type.value} conf={int(result.confidence*100)}%"
+        cv2.rectangle(out, (8, h - 30), (w - 8, h - 8), (15, 22, 32), -1)
+        cv2.putText(out, txt, (14, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 255, 240), 1, cv2.LINE_AA)
+        return out

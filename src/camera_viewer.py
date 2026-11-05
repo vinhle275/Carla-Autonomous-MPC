@@ -421,6 +421,21 @@ class CameraViewer:
         self.display.blit(badge, (x + 8, y + 8))
         self.display.blit(txt_surf, (x + 18, y + 12))
 
+    def _draw_corridor_badge(self, x: int, y: int, road_min: float, road_max: float, prefix="HÀNH LANG"):
+        """Vẽ thẻ HUD hiển thị ranh giới [road_min; road_max] trên khung nhìn camera"""
+        if not self.show_hud or road_min is None or road_max is None:
+            return
+        text = f"{prefix}: [{road_min:+.2f}m ; {road_max:+.2f}m]"
+        txt_surf = self.font_cam_tag.render(text, True, (230, 250, 255))
+        bg_w = txt_surf.get_width() + 18
+        bg_h = 24
+        badge = pygame.Surface((bg_w, bg_h), pygame.SRCALPHA)
+        badge.fill((10, 16, 26, 205))
+        pygame.draw.rect(badge, (0, 210, 225), (0, 0, 4, bg_h))
+        pygame.draw.rect(badge, (35, 75, 105), (0, 0, bg_w, bg_h), 1)
+        self.display.blit(badge, (x, y))
+        self.display.blit(txt_surf, (x + 10, y + 4))
+
     def _draw_top_bar(self, hud_info: dict):
         """
         Vẽ Frame [TOP BAR] (1440 x 60 px tại y = 0..60):
@@ -483,12 +498,25 @@ class CameraViewer:
         current_idx = hud_info.get('current_idx', 0)
         total_idx = max(1, hud_info.get('total_idx', 1))
 
+        road_min = hud_info.get('road_min', None)
+        road_max = hud_info.get('road_max', None)
+        if road_min is not None and road_max is not None:
+            corridor_str = f"Hành lang: [{road_min:+.2f}; {road_max:+.2f}]m"
+        else:
+            corridor_str = ""
+
         if s_ego_m is not None and s_total_m is not None and s_total_m > 0.1:
             pct = min(100.0, max(0.0, (s_ego_m / s_total_m) * 100.0))
-            prog_str = f"Tiến độ: s={s_ego_m:.1f}m / {s_total_m:.1f}m ({pct:.0f}%)  [WP: {current_idx}/{total_idx}]"
+            if corridor_str:
+                prog_str = f"s={s_ego_m:.1f}m ({pct:.0f}%) [WP {current_idx}]  |  {corridor_str}"
+            else:
+                prog_str = f"Tiến độ: s={s_ego_m:.1f}m / {s_total_m:.1f}m ({pct:.0f}%)  [WP: {current_idx}/{total_idx}]"
         else:
             pct = (current_idx / total_idx) * 100.0
-            prog_str = f"Tiến độ: WP {current_idx}/{total_idx} ({pct:.0f}%)"
+            if corridor_str:
+                prog_str = f"WP {current_idx}/{total_idx} ({pct:.0f}%)  |  {corridor_str}"
+            else:
+                prog_str = f"Tiến độ: WP {current_idx}/{total_idx} ({pct:.0f}%)"
 
         c2_line1 = self.font_main.render(f"MPC: {bypass_text}", True, bypass_color)
         c2_line2 = self.font_sub.render(prog_str, True, (185, 200, 220))
@@ -580,6 +608,14 @@ class CameraViewer:
         # Đường phân cách mảnh giữa các khung nhìn Camera
         pygame.draw.line(self.display, (0, 160, 200), (sub_x, cam_y), (sub_x, cam_y + MAIN_VIEW_HEIGHT), 2)
         pygame.draw.line(self.display, (0, 160, 200), (sub_x, front_y), (self.width, front_y), 2)
+
+        # Thẻ HUD hiển thị ranh giới hành lang mặt đường [road_min; road_max] trên camera
+        if hud_info is not None and self.show_hud:
+            r_min = hud_info.get('road_min', None)
+            r_max = hud_info.get('road_max', None)
+            if r_min is not None and r_max is not None:
+                self._draw_corridor_badge(12, cam_y + MAIN_VIEW_HEIGHT - 32, r_min, r_max, prefix="HÀNH LANG ĐƯỜNG")
+                self._draw_corridor_badge(sub_x + 8, cam_y + SUB_VIEW_HEIGHT - 30, r_min, r_max, prefix="HÀNH LANG BEV")
 
         # 4. Cập nhật dữ liệu và vẽ 2 Đồ thị Realtime (y = 660..900)
         plot_y = TOP_BAR_HEIGHT + MAIN_VIEW_HEIGHT  # y = 660

@@ -32,6 +32,7 @@ from src.config import (
     MAX_CONTROL_BRAKING_M_S_2, MAX_WHEEL_ANGLE_RAD,
     ENABLE_YELLOW_LINE_DETECTOR, DEBUG_YELLOW_DRAW,
     CAM_IMAGE_WIDTH, CAM_IMAGE_HEIGHT, CAM_FOV_DEG,
+    ENABLE_DYNAMIC_ROAD_CORRIDOR, DEBUG_DRAW_ROAD_CORRIDOR
 )
 from src.help_functions import load_csv_trajectory, update_reference_point, get_ref_trajectory, normalize_angle
 from src.logger import Logger
@@ -42,6 +43,7 @@ from src.create_obstacles.obstacle_generator import ObstacleManager, MovingObsta
 from src.camera_viewer import CameraViewer
 from src.emergency_safety import EmergencySafetyManager, VehicleMode
 from src.yellow_line_detector import RealtimeYellowLineDetector, LineType
+from src.road_corridor import RoadCorridorTracker
 
 
 def main():
@@ -51,6 +53,7 @@ def main():
     parser.add_argument('--with-obstacles', action='store_true', help="Bật sinh vật cản né (ghi đè config.py)")
     parser.add_argument('--no-camera-window', action='store_true', help="Tắt cửa sổ camera theo dõi xe")
     parser.add_argument('--camera-window', action='store_true', help="Bật cửa sổ camera theo dõi xe")
+    parser.add_argument('--max-steps', type=int, default=None, help="Số bước mô phỏng tối đa")
     args, unknown = parser.parse_known_args()
 
     enable_obstacles = ENABLE_OBSTACLES
@@ -138,6 +141,17 @@ def main():
 
     logger = Logger()
 
+    # Khởi tạo Bộ Nhận diện Hành lang mặt đường động (Dynamic Road Corridor) từ CARLA OpenDRIVE Map
+    corridor_tracker = None
+    if ENABLE_DYNAMIC_ROAD_CORRIDOR and hasattr(carla, 'carla_map') and carla.carla_map is not None:
+        try:
+            corridor_tracker = RoadCorridorTracker(carla_map=carla.carla_map)
+            corridor_tracker.build_trajectory_corridor(x_traj, y_traj, theta_traj)
+            if USE_LINEARIZED_QP_MPC and hasattr(mpc_controller, 'set_corridor_tracker'):
+                mpc_controller.set_corridor_tracker(corridor_tracker)
+        except Exception as _corr_err:
+            print(f"[ROAD CORRIDOR] Lỗi khởi tạo hành lang động: {_corr_err}")
+
     # 7. Khởi tạo Bộ Quản Lý An Toàn & 2 Chế Độ Điều Khiển
     safety_manager = EmergencySafetyManager()
 
@@ -162,10 +176,15 @@ def main():
     jerk_ema_alpha = 0.35
 
     current_idx = 0
+    step_count = 0
     print("\n--- BẮT ĐẦU VÒNG LẶP ĐIỀU KHIỂN MPC BÁM ĐƯỜNG & NÉ VẬT CẢN ---")
 
     try:
         while current_idx < total_waypoints - 1:
+            if args.max_steps is not None and step_count >= args.max_steps:
+                print(f"[TEST COMPLETED] Đã đạt giới hạn max-steps={args.max_steps}.")
+                break
+            step_count += 1
             start_time = time.time()
 
             # Cap nhat vi tri vat can di dong (truoc khi scan cam bien)
@@ -240,6 +259,10 @@ def main():
 
             # Vẽ trực quan hóa hộp 3D vùng nguy hiểm va chạm trước đầu xe trên CARLA
             carla.draw_emergency_danger_zone(x0, y0, theta0_raw, z_ego=0.5, is_triggered=is_emergency, life_time=dt * 2)
+
+            # Vẽ trực quan hóa hành lang mặt đường động (viền cyan/magenta)
+            if DEBUG_DRAW_ROAD_CORRIDOR and corridor_tracker is not None:
+                corridor_tracker.draw_debug_corridor(carla, current_idx, lookahead_pts=30, life_time=dt * 2)
 
             # Phân nhánh thực thi theo 2 chế độ điều khiển:
             t_solve_start = time.perf_counter()
@@ -327,6 +350,14 @@ def main():
             if ENABLE_SPECTATOR_FOLLOW:
                 carla.follow_vehicle(carla.ego_vehicle)
 
+            # Lấy thông số biên hành lang mặt đường hiện tại [road_min, road_max] cho tâm xe
+            road_min_curr = getattr(mpc_controller, 'current_road_min', None)
+            road_max_curr = getattr(mpc_controller, 'current_road_max', None)
+            if (road_min_curr is None or road_max_curr is None) and corridor_tracker is not None:
+                road_min_curr, road_max_curr, _ = corridor_tracker.get_corridor_at_idx(current_idx)
+            if road_min_curr is None or road_max_curr is None:
+                road_min_curr, road_max_curr = -3.90, 3.90
+
             # Cập nhật khung hình và hiển thị thông số HUD lên cửa sổ Camera riêng
             if camera_viewer is not None:
                 if is_emergency:
@@ -360,6 +391,8 @@ def main():
                     's_total_m': s_total_m,
                     'is_emergency': is_emergency,
                     'yellow_line': yellow_hud,
+                    'road_min': float(road_min_curr),
+                    'road_max': float(road_max_curr),
                 }
                 is_viewer_alive = camera_viewer.render(hud_info)
                 if not is_viewer_alive:
@@ -392,8 +425,10 @@ def main():
                 yd_str = f"{yellow_result.d_yellow_line_m:.2f}m" if yellow_result.d_yellow_line_m is not None else ""
                 yl_tag = f" | [VẠCH VÀNG NÉT LIỀN ĐÔI d={yd_str}]"
 
+            corridor_tag = f" | Road: [{road_min_curr:+.2f}m; {road_max_curr:+.2f}m]"
+
             print(f"Index: {current_idx}/{total_waypoints} | Pos: ({x0:.1f}, {y0:.1f}) | "
-                  f"Speed: {v0:.2f}/{v_ref[0]:.2f} m/s | Steer: {steer:.2f} | Solve: {solve_time_sec:.3f}s{obs_status}{yl_tag}", end="\r", flush=True)
+                  f"Speed: {v0:.2f}/{v_ref[0]:.2f} m/s | Steer: {steer:.2f} | Solve: {solve_time_sec:.3f}s{obs_status}{corridor_tag}{yl_tag}", end="\r", flush=True)
 
             time.sleep(sleep_time)
 

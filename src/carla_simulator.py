@@ -262,10 +262,8 @@ class CarlaSimulator:
             txt_loc = carla.Location(x=box_x, y=box_y, z=box_z + 1.2)
             debug.draw_string(txt_loc, "[!] VÙNG NGUY HIỂM - PHANH GẤP!", draw_shadow=True,
                               color=carla.Color(255, 50, 50), life_time=life_time)
-        else:
-            box_color = carla.Color(0, 255, 120, 70)
-            thickness = 0.03
-            debug.draw_box(box, rotation, thickness=thickness, color=box_color, life_time=life_time)
+        # Khi is_triggered=False: không vẽ hộp 3D phát sáng trước mũi xe để tránh làm lóa
+        # cảm biến camera RGB đặt trên nắp capo (Front Hood-Cam dùng cho Computer Vision).
 
     def get_main_ego_vehicle_state(self):
         if not self.ego_vehicle or not self.ego_vehicle.is_alive:

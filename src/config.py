@@ -48,13 +48,13 @@ FINE_LATERAL_COEF = 30.0     # Phạt độ lệch ngang vuông góc (hút xe v�
 FINE_STEER_COEF = 40.0       # Phạt biên độ góc lái
 FINE_ACC_COEF = 4.0          # Phạt gia tốc (cân bằng bám tốc độ và êm ái, tránh nhấp nhả ga/phanh)
 FINE_STEER_DOT_COEF = 2000.0 # Phạt tốc độ bẻ lái nội bộ chân trời và giữa 2 chu kỳ (triệt tiêu giật lái mà không gây trễ pha trả lái)
-FINE_ACC_DOT_COEF = 180.0    # Phạt giật ga/phanh (triệt tiêu độ giật dọc Jerk da/dt < 2.0 m/s^3)
+FINE_ACC_DOT_COEF = 500.0    # Phạt giật ga/phanh (triệt tiêu độ giật dọc Jerk da/dt < 2.0 m/s^3)
 
 # ==============================================================================
 # --- CẤU HÌNH SINH VẬT CẢN TĨNH (STATIC OBSTACLES) ---
 # ==============================================================================
 ENABLE_OBSTACLES = True               # True: Spawn vật cản cố định từ data/obstacles.csv; False: Chạy thuần bám quỹ đạo
-OBSTACLE_PREVIEW_DURATION_SEC = 60.0  # Thời gian vật cản tồn tại khi chạy độc lập script obstacle_generator.py (giây)
+OBSTACLE_PREVIEW_DURATION_SEC = 10.0  # Thời gian vật cản tồn tại khi chạy độc lập script obstacle_generator.py (giây)
 
 # Danh sách Blueprint các vật cản tĩnh phong phú (Cọc tiêu, rào chắn, thùng hàng, xe đỗ tĩnh)
 # STATIC_OBSTACLE_BLUEPRINTS = [
@@ -68,7 +68,7 @@ OBSTACLE_PREVIEW_DURATION_SEC = 60.0  # Thời gian vật cản tồn tại khi 
 #     'vehicle.mini.cooperst',              # Xe Mini Cooper đỗ dừng tĩnh
 # ]
 STATIC_OBSTACLE_BLUEPRINTS = [
-'vehicle.toyota.prius',
+    'vehicle.toyota.prius',
 ]
 
 # ==============================================================================
@@ -98,7 +98,8 @@ OBSTACLE_VEHICLE_SAFETY_RADIUS_M = 2.3 # Bán kính an toàn cho xe ô tô đỗ
 OBSTACLE_SPATIAL_CLUSTER_RANGE_M = 6.5  # Khoảng cách dọc tối đa (m) để gộp chung vào 1 mặt cắt ngang
 
 # Thông số hình học thân xe & lề đường mặc định
-DEFAULT_ROAD_HALF_WIDTH_M = 5.25      # Giới hạn biên dịch tâm xe tối đa (m) (A_shift_max ~ 3.20m; nếu vật cản ép vượt quá biên này sẽ coi là chắn kín làn né)
+DEFAULT_ROAD_HALF_WIDTH_M = 5.25      # Giới hạn biên dự phòng khi không có bản đồ (m)
+ENABLE_DYNAMIC_ROAD_CORRIDOR = True   # True: Tự động trích xuất hành lang mặt đường động từ CARLA OpenDRIVE Map
 MAX_LATERAL_ACCEL_M_S_2 = 3.2           # Gia tốc ngang tối đa cho phép khi vừa cua vừa né (m/s^2)
 EGO_FRONT_OVERHANG_M = 2.4              # Khoảng cách từ tâm xe Ego tới cản trước (m)
 EGO_REAR_OVERHANG_M = 2.4               # Khoảng cách từ tâm xe Ego tới cản sau (m)
@@ -116,7 +117,7 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 # ==============================================================================
 # --- CẤU HÌNH THÍCH ỨNG TỐC ĐỘ KHI GẶP VẬT CẢN (ADAPTIVE SPEED GOVERNOR) ---
 # ==============================================================================
-OBSTACLE_CAUTION_SPEED_MS = 6.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~18.0 km/h - lướt êm, thoát nhanh, không quá chậm)
+OBSTACLE_CAUTION_SPEED_MS = 5.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~18.0 km/h - lướt êm, thoát nhanh, không quá chậm)
 OBSTACLE_SLOWDOWN_DISTANCE_M = 15.0   # Khoảng cách bắt đầu giảm tốc êm (m)
 OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 2.0  # Hành lang khoảng cách lệch ngang tối đa so với tim đường (|d_lat| <= 2.0m) để kích hoạt né (bỏ qua xe làn bên cạnh)
 
@@ -178,6 +179,7 @@ DEBUG_DRAW_FULL_TRAJECTORY = True      # True: Vẽ đường tim đường toà
 DEBUG_DRAW_TRAJECTORY_ARROWS = False   # False: Tắt các mũi tên đỏ dày đặc trên mặt đường để thoáng mắt
 DEBUG_DRAW_HORIZON_PATH = True         # True: Giữ lại vệt đường đỏ N bước dự đoán MPC né vật cản
 DEBUG_DRAW_EMERGENCY_ZONE = True       # True: Hiển thị hộp 3D vùng nguy hiểm trước đầu xe (Xanh: An toàn, Đỏ: Phanh gấp)
+DEBUG_DRAW_ROAD_CORRIDOR = False       # True: Vẽ 2 viền cyan/magenta hiển thị hành lang chạy được trên CARLA 3D
 
 # ==============================================================================
 # --- CẤU HÌNH NHẬN DIỆN VẠCH VÀNG (YELLOW LINE DETECTOR) ---
@@ -212,13 +214,29 @@ IPM_BEV_HEIGHT = 480   # Chiều cao ảnh BEV đầu ra (px)
 BEV_METERS_PER_PIXEL_X = 0.035   # ~3.5 cm/px theo chiều ngang
 BEV_METERS_PER_PIXEL_Y = 0.05    # ~5.0 cm/px theo chiều dọc (xa-gần)
 
-# --- Bộ lọc màu vàng (HSV) ---
-YELLOW_H_LOW  = 12    # Hue thấp nhất của vàng
-YELLOW_H_HIGH = 38    # Hue cao nhất của vàng
-YELLOW_S_LOW  = 40    # Saturation tối thiểu
+# --- Bộ lọc màu vàng (HSV, OpenCV H ∈ [0,180]) ---
+# Đo thực tế trên Front Hood-Cam CARLA Town10HD: vạch vàng H≈27-29, S≈31-62 (vàng NHẠT), V≈240-252;
+# nhựa đường H≈16, S≈31, V≈164 → phân biệt bằng Hue + độ sáng V, KHÔNG dùng S cao.
+YELLOW_H_LOW  = 22
+YELLOW_H_HIGH = 34
+YELLOW_S_LOW  = 25
 YELLOW_S_HIGH = 255
-YELLOW_V_LOW  = 70   # Value (độ sáng) tối thiểu
+YELLOW_V_LOW  = 195
 YELLOW_V_HIGH = 255
+
+# --- Bộ lọc màu trắng (vạch phân làn / mép đường) ---
+WHITE_H_LOW   = 0
+WHITE_H_HIGH  = 180
+WHITE_S_LOW   = 0
+WHITE_S_HIGH  = 40     # Ít màu
+WHITE_V_LOW   = 200    # Ngưỡng sàn; thực tế dùng max(200, V_nhựa_đường + 45) thích ứng theo ánh sáng
+WHITE_V_HIGH  = 255
+
+# --- Thông số camera Front Hood-Cam (PHẢI khớp camera_viewer.py) — dùng tính IPM giải tích ---
+FRONT_CAM_X_M       = 2.2    # Camera đặt trước tâm xe (m)
+FRONT_CAM_Z_M       = 1.2    # Độ cao camera so với mặt đường (m)
+FRONT_CAM_PITCH_DEG = -5.0   # Góc pitch (âm = chúc xuống)
+FRONT_CAM_FOV_DEG   = 90.0
 
 # --- Sliding Window ---
 YELLOW_NWIN          = 10    # Số cửa sổ chia chiều cao BEV (9–12)
@@ -236,4 +254,4 @@ YELLOW_LINE_CLEARANCE_M  = 0.35   # Khoảng đệm tối thiểu giữa thân x
 
 # --- Bật / Tắt module nhận diện vạch vàng ---
 ENABLE_YELLOW_LINE_DETECTOR = True   # True: Kích hoạt; False: Bỏ qua (tiết kiệm CPU nếu không cần)
-DEBUG_YELLOW_DRAW = False             # True: Vẽ overlay vạch vàng lên HUD camera (chỉ dùng khi debug)
+DEBUG_YELLOW_DRAW = True             # True: Vẽ overlay vạch vàng lên HUD camera (chỉ dùng khi debug)

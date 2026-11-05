@@ -24,6 +24,7 @@ Hệ thống được thiết kế theo kiến trúc phân tầng chuẩn của 
 | :--- | :--- |
 | src/main.py| **Vòng lặp điều khiển chính (10Hz)**: kết nối CARLA, đọc trạng thái xe, gọi camera nhận diện vạch vàng, quét cảm biến vật cản, cập nhật 2 chế độ an toàn, gọi bộ giải MPC và gửi tín hiệu điều khiển xuống xe. |
 | src/config.py | **Trung tâm cấu hình hợp nhất**: tham số xe, trọng số hàm chi phí MPC, cấu hình cảm biến, hình học S-Curve né vật cản, nhận diện vạch vàng, 2 chế độ khẩn cấp và Cockpit Dashboard. |
+| src/road_corridor.py | **Hành lang mặt đường động (Dynamic Road Corridor)**: Đọc cấu trúc OpenDRIVE Map từ CARLA theo thời gian thực, xác định mép vỉa hè/hộ lan, số làn cùng chiều bên trái/phải và biên pháp lý `[road_min(s), road_max(s)]` thay thế hoàn toàn hardcode `+-5.25m`. |
 | src/linearized_mpc_controller.py | **Bộ điều khiển cốt lõi (LMPC)**: Quy hoạch đường bao né vật cản cục bộ trên hệ tọa độ Frenet, bộ điều tốc an toàn, xử lý dừng Roadblock và bộ giải **Successive Linearization QP-MPC** với biến bù mềm (Slack Variables) và ràng buộc biên pháp lý động. |
 | src/yellow_line_detector.py | **Nhận diện vạch vàng thời gian thực**: Trích xuất ảnh Front-cam, biến đổi không gian mắt chim (IPM), lọc màu HSV, thuật toán Sliding Window phân loại vạch liền (SOLID) / vạch đứt (DASHED) kết hợp CARLA Map Ground Truth. |
 | src/emergency_safety.py | **Bộ quản lý an toàn 2 chế độ**: Quản lý Chế độ 1 (Bám đường né vật cản theo MPC) và Chế độ 2 (Phanh gấp khẩn cấp cực đại bỏ qua mọi ràng buộc khi vật cản di động xâm nhập vùng nguy hiểm trước đầu xe). |
@@ -160,12 +161,15 @@ $$J = \sum_{k=0}^{N-1} \Big( J_{x,k} + J_{y,k} + J_{v,k} + J_{\theta,k} + J_{\te
 4. **Ràng buộc vận tốc**:
    * $0.0 \le v_k \le 15.0\text{ m/s}$ (khi Roadblock hoặc dừng).
    * $\min(v_0, 1.5) \le v_k \le 15.0\text{ m/s}$ (khi chạy bình thường, chống dừng khựng/lùi xe).
-5. **Ràng buộc Hành lang Biên Pháp lý cho Tâm xe (Legal Corridor Bounds)**:
-   * Mép đường vật lý là `DEFAULT_ROAD_HALF_WIDTH_M = 5.25m`.
-   * Trừ đi bán kính an toàn thân xe $r_{\text{clearance}} = 1.0\text{m (nửa xe)} + 0.35\text{m (lề)} = 1.35\text{m}$:
-     * **Biên phải tối đa cho tâm xe**: `road_max = 5.25 - 1.35 = +3.90m` (chống sườn xe leo lên vỉa hè mép phải).
-     * **Biên trái tối đa khi vạch đứt (DASHED)**: `road_min = -5.25 + 1.35 = -3.90m`.
-     * **Biên trái tối đa khi vạch liền (SOLID)**: `road_min = max(-3.90m, -1.75 + 1.35) = -0.40m` (cấm tuyệt đối đè vạch vàng sang làn đối diện).
+5. **Ràng buộc Hành lang Biên Pháp lý Động cho Tâm xe (Dynamic Legal Corridor Bounds)**:
+   * Được tính toán tự động theo thời gian thực từ bản đồ CARLA OpenDRIVE (`RoadCorridorTracker`):
+     * **Mép phải hợp pháp $d_{\text{right\_legal}}(s)$**: Quét làn cùng chiều ngoài cùng bên phải, dừng tại mép vỉa hè / hộ lan.
+     * **Mép trái hợp pháp $d_{\text{left\_legal}}(s)$**: Bao gồm các làn cùng chiều bên trái (nếu có), dừng tại vạch vàng nét liền phân chia làn ngược chiều.
+   * Biên an toàn cho tâm xe sau khi trừ $r_{\text{clearance}} = 1.0\text{m (nửa xe)} + 0.35\text{m (lề)} = 1.35\text{m}$:
+     * **Biên phải tối đa cho tâm xe**: $\text{road\_max}(s) = d_{\text{right\_legal}}(s) - 1.35\text{m}$ (ví dụ làn đơn sát lề phải: $+1.75 - 1.35 = \mathbf{+0.40\text{m}}$, triệt tiêu hoàn toàn lỗi xe leo vỉa hè mép phải).
+     * **Biên trái tối đa cho tâm xe**: $\text{road\_min}(s) = d_{\text{left\_legal}}(s) + 1.35\text{m}$ (ví dụ đường có thêm 1 làn cùng chiều bên trái: $-5.25 + 1.35 = \mathbf{-3.90\text{m}}$, cho phép mượn làn trái vượt vật cản hợp pháp).
+   * Ràng buộc trong QP-MPC tại từng bước dự đoán $k = 0 \dots N-1$:
+     $$\text{road\_min}[k] - \varepsilon_{\text{road}, k} \le d_{\text{lat}, k} \le \text{road\_max}[k] + \varepsilon_{\text{road}, k}$$
 
 ---
 

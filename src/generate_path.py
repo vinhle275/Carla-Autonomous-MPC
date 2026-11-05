@@ -125,12 +125,12 @@ def main():
         sim.set_spectator(x=x_traj[0], y=y_traj[0], z=35.0, pitch=-75.0, yaw=yaw_deg)
 
         # Ve duong di mau xanh la + mui ten do chi huong
-        sim.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=300.0)
+        sim.draw_full_trajectory_3d(x_traj, y_traj, theta_traj, life_time=20.0)
 
         # Ve cac khoi hop vat can co dinh 3D mau do
         for obs in obstacles:
             sim.draw_obstacle_box_3d(obs['x'], obs['y'],
-                                     size=OBSTACLE_SIZE, life_time=300.0)
+                                     size=OBSTACLE_SIZE, life_time=20.0)
 
         # Ve duong di cua vat can di dong (mau vang cam)
         for mov in moving_obstacles:
@@ -139,11 +139,11 @@ def main():
             for i in range(len(wps) - 1):
                 x1, y1 = wps[i]['x'], wps[i]['y']
                 x2, y2 = wps[i + 1]['x'], wps[i + 1]['y']
-                sim.draw_moving_obstacle_path(x1, y1, x2, y2, life_time=300.0)
+                sim.draw_moving_obstacle_path(x1, y1, x2, y2, life_time=20.0)
             # Danh dau diem xuat phat
             sim.draw_moving_obstacle_start(
                 wps[0]['x'], wps[0]['y'],
-                label=f"MOV#{mov_id}", life_time=300.0
+                label=f"MOV#{mov_id}", life_time=20.0
             )
 
         print(

@@ -241,6 +241,7 @@ def main():
                         ego_vehicle=carla.ego_vehicle,
                         carla_map=carla.carla_map,
                         ref_xy=(float(x_ref[0]), float(y_ref[0])),
+                        ref_theta=float(theta_ref[0]),
                     )
                     # Cập nhật ràng buộc vạch vàng vào MPC controller
                     if USE_LINEARIZED_QP_MPC and hasattr(mpc_controller, 'update_yellow_line_constraint'):
@@ -324,23 +325,23 @@ def main():
                 )
 
             # BẢO VỆ TUYỆT ĐỐI KHÔNG CHẠM VẠCH VÀNG:
-            # Nếu khoảng cách từ tâm xe tới vạch vàng <= 1.15m (mép sườn xe cách vạch vàng <= 15cm):
-            # - Nếu bị roadblock hoặc xe đang di chuyển lệch tiếp sang trái sát vạch (<= 1.05m và v_lat_ego < -0.02):
-            #   Phanh giảm tốc/dừng an toàn; khi đã hãm lại hoặc không có roadblock thì mớm lái sang phải để thoát kẹt về tâm làn.
+            # Can thiệp an toàn nếu khoảng cách tâm xe tới vạch vàng <= 1.05m (mép xe <= 5cm):
+            # - Nếu bị roadblock: Phanh dừng khẩn cấp.
+            # - Chỉ mớm lái nhẹ sang phải nếu xe đang di chuyển lệch tiếp sang trái (v_lat_ego < -0.02)
+            #   để tránh tạo dao động chattering (lắc lái trái/phải liên tục khi bám đường).
             if (yellow_result is not None
                     and yellow_result.line_type == LineType.SOLID
                     and yellow_result.d_yellow_line_m is not None
-                    and yellow_result.d_yellow_line_m <= 1.15):
+                    and yellow_result.d_yellow_line_m <= 1.05):
                 v_lat_ego = v0 * np.sin(theta0 - theta_ref[0])
                 is_rb = hasattr(mpc_controller, 'is_roadblock') and mpc_controller.is_roadblock
-                # Mớm lái sang phải tăng dần theo độ gần vạch vàng thay vì nhảy số cứng 0.08
-                push_right = float(np.clip(0.03 + (1.15 - yellow_result.d_yellow_line_m) * 0.35, 0.03, 0.09))
-                if is_rb or (yellow_result.d_yellow_line_m <= 1.05 and v_lat_ego < -0.02 and v0 > 0.3):
+                if is_rb or (yellow_result.d_yellow_line_m <= 1.00 and v_lat_ego < -0.05 and v0 > 0.5):
                     throttle = 0.0
                     brake = 1.0
-                    steer = max(push_right, steer)
-                    print(f"\n[DỪNG AN TOÀN TRƯỚC VẠCH VÀNG] Cự ly tới vạch vàng chỉ còn {yellow_result.d_yellow_line_m:.2f}m (mép xe <= 15cm)! Phanh an toàn!")
-                else:
+                    steer = max(0.05, steer)
+                    print(f"\n[DỪNG AN TOÀN TRƯỚC VẠCH VÀNG] Cự ly tới vạch vàng chỉ còn {yellow_result.d_yellow_line_m:.2f}m (mép xe <= 5cm)! Phanh an toàn!")
+                elif v_lat_ego < -0.02:
+                    push_right = float(np.clip(0.02 + (1.05 - yellow_result.d_yellow_line_m) * 0.25, 0.02, 0.06))
                     steer = max(push_right, steer)
 
             logger.log_controller_output(steer, throttle, brake, cost=cost_val)

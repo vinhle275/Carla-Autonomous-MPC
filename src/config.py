@@ -40,15 +40,15 @@ MAX_CONTROL_ACCELERATION_M_S_2 = 10.0
 MAX_CONTROL_BRAKING_M_S_2 = -4.1
 
 # Trọng số tối ưu MPC (Cân bằng biên độ - pha, triệt tiêu dao động hình sin và bám làn ổn định khi nhập làn)
-FINE_X_COEF = 20.0           # Phạt sai số X
-FINE_Y_COEF = 20.0           # Phạt sai số Y
-FINE_V_COEF = 25.0           # Phạt sai số vận tốc V
-FINE_THETA_COEF = 30.0       # Phạt sai số góc hướng Theta (giữ mũi xe ổn định, dứt khoát nắn thẳng khi nhập làn)
-FINE_LATERAL_COEF = 30.0     # Phạt độ lệch ngang vuông góc (hút xe về tim đường dứt khoát, không để trôi làn)
-FINE_STEER_COEF = 40.0       # Phạt biên độ góc lái
-FINE_ACC_COEF = 4.0          # Phạt gia tốc (cân bằng bám tốc độ và êm ái, tránh nhấp nhả ga/phanh)
-FINE_STEER_DOT_COEF = 2000.0 # Phạt tốc độ bẻ lái nội bộ chân trời và giữa 2 chu kỳ (triệt tiêu giật lái mà không gây trễ pha trả lái)
-FINE_ACC_DOT_COEF = 500.0    # Phạt giật ga/phanh (triệt tiêu độ giật dọc Jerk da/dt < 2.0 m/s^3)
+FINE_X_COEF = 2.0             # Phạt sai số X dọc (giảm về 2.0 để không kéo lệch tâm xe vào trong dây cung khúc cua)
+FINE_Y_COEF = 2.0             # Phạt sai số Y dọc
+FINE_V_COEF = 12.0            # Phạt sai số vận tốc V
+FINE_THETA_COEF = 120.0       # Phạt sai số góc hướng Theta (tăng mạnh làm giảm chấn góc hướng D-term, triệt tiêu lắc đuôi/lắc vô lăng)
+FINE_LATERAL_COEF = 30.0      # Phạt độ lệch ngang vuông góc chuẩn Frenet (bám chắc tâm làn)
+FINE_STEER_COEF = 25.0        # Phạt biên độ góc lái (giảm để xe giữ góc lái tự nhiên khi vào cua mà không bị cản trở)
+FINE_ACC_COEF = 2.0           # Phạt gia tốc (êm ái, bám tốc mượt)
+FINE_STEER_DOT_COEF = 300.0   # Phạt tốc độ bẻ lái (giảm từ 5000 -> 300 để triệt tiêu trễ pha, cho phép trả thẳng lái kịp thời khi tới tâm làn)
+FINE_ACC_DOT_COEF = 50.0      # Phạt giật ga/phanh (triệt tiêu độ giật dọc Jerk da/dt < 2.0 m/s^3)
 
 # ==============================================================================
 # --- CẤU HÌNH SINH VẬT CẢN TĨNH (STATIC OBSTACLES) ---
@@ -109,7 +109,7 @@ EGO_HALF_WIDTH_M = 1.0                  # Nửa chiều rộng thân xe Ego (m)
 # --- CẤU HÌNH TUYẾN TÍNH HÓA LẶP & RÀNG BUỘC MỀM (SLACK QP-MPC) ---
 # ==============================================================================
 USE_LINEARIZED_QP_MPC = True          # Bật chế độ điều khiển MPC Tuyến tính hóa lặp (QP-MPC)
-MPC_MAX_LINEARIZATION_ITER = 2        # Số vòng lặp tuyến tính hóa tại mỗi bước (1-2 vòng lặp)
+MPC_MAX_LINEARIZATION_ITER = 1        # Số vòng lặp tuyến tính hóa tại mỗi bước (RTI - Real-Time Iteration 1 vòng lặp giải nhanh ~65ms)
 MPC_W_SLACK = 20000.0                 # Trọng số phạt biến bù nới lỏng (Slack Variable)
 MPC_W_SLACK_LINEAR = 500.0            # Trọng số phạt bậc 1 cho biến bù (Exact Penalty)
 OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m) (45cm cách mép ngoài vật cản giúp giữ làn ổn định)
@@ -117,7 +117,7 @@ OBSTACLE_AVOIDANCE_MARGIN_M = 0.35    # Khoảng đệm an toàn dự phòng (m)
 # ==============================================================================
 # --- CẤU HÌNH THÍCH ỨNG TỐC ĐỘ KHI GẶP VẬT CẢN (ADAPTIVE SPEED GOVERNOR) ---
 # ==============================================================================
-OBSTACLE_CAUTION_SPEED_MS = 5.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~18.0 km/h - lướt êm, thoát nhanh, không quá chậm)
+OBSTACLE_CAUTION_SPEED_MS = 6.0       # Vận tốc an toàn khi lách qua vật cản (m/s) (~18.0 km/h - lướt êm, thoát nhanh, không quá chậm)
 OBSTACLE_SLOWDOWN_DISTANCE_M = 15.0   # Khoảng cách bắt đầu giảm tốc êm (m)
 OBSTACLE_TRIGGER_LATERAL_CORRIDOR_M = 2.0  # Hành lang khoảng cách lệch ngang tối đa so với tim đường (|d_lat| <= 2.0m) để kích hoạt né (bỏ qua xe làn bên cạnh)
 

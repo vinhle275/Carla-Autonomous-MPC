@@ -95,7 +95,7 @@ class RealtimeYellowLineDetector:
 
         self._ema_min: Optional[float] = None
         self._ema_max: Optional[float] = None
-        self._ema_alpha = 0.35
+        self._ema_alpha = 0.15   # Giảm từ 0.35 -> 0.15 để lọc mịn dằn xóc/rung camera, triệt tiêu giật biên độ ngang 5-10cm
 
         self._lower_y = np.array([YELLOW_H_LOW, YELLOW_S_LOW, YELLOW_V_LOW], np.uint8)
         self._upper_y = np.array([YELLOW_H_HIGH, 255, 255], np.uint8)
@@ -152,7 +152,7 @@ class RealtimeYellowLineDetector:
                 result = YellowLineResult()
 
         if result.confidence < 0.5 and ego_vehicle is not None and carla_map is not None:
-            self._map_fallback(result, ego_vehicle, carla_map, ref_xy)
+            self._map_fallback(result, ego_vehicle, carla_map, ref_xy, ref_theta=ref_theta)
 
         if result.road_min_m is not None and result.road_max_m is not None:
             result.road_min_m = min(result.road_min_m, -0.45)
@@ -211,6 +211,16 @@ class RealtimeYellowLineDetector:
             result.confidence = 0.0
             return result
 
+        # Phát hiện vạch kẻ người đi bộ (Zebra Crosswalk): nhiều vạch trắng song song nằm sát nhau (< 1.8m)
+        white_lines = [l for l in merged if l.color == 'white']
+        close_white_pairs = sum(
+            1 for i in range(1, len(white_lines))
+            if abs(white_lines[i].d_ego_m - white_lines[i - 1].d_ego_m) < 1.8
+        )
+        if len(white_lines) >= 5 or close_white_pairs >= 2:
+            result.confidence = 0.0
+            return result
+
         left = sorted([l for l in merged if l.d_ego_m < 0], key=lambda l: -l.d_ego_m)   # gần → xa
         right = sorted([l for l in merged if l.d_ego_m > 0], key=lambda l: l.d_ego_m)
 
@@ -221,8 +231,8 @@ class RealtimeYellowLineDetector:
             result.d_yellow_line_m = float(-yl.d_ego_m)
 
         # Biên trái: đi ra ngoài qua vạch trắng ĐỨT; dừng ở vạch vàng hoặc vạch LIỀN
-        left_bound, left_kind = self._walk_out(left, sign=-1)
-        right_bound, right_kind = self._walk_out(right, sign=+1)
+        left_bound, left_kind = self._walk_out(left, sign=-1, has_yellow=(yl is not None))
+        right_bound, right_kind = self._walk_out(right, sign=+1, has_yellow=False)
         result.left_line_type = left[0].line_type if left else LineType.NONE
         result.right_line_type = LineType.SOLID if right_kind in ('solid', 'yellow') else (
             LineType.DASHED if right_kind == 'assumed' else LineType.NONE)
@@ -257,12 +267,16 @@ class RealtimeYellowLineDetector:
             result.debug_bev = dbg
         return result
 
-    def _walk_out(self, side: List[LaneLine], sign: int) -> Tuple[Optional[float], str]:
+    def _walk_out(self, side: List[LaneLine], sign: int, has_yellow: bool = False) -> Tuple[Optional[float], str]:
         """Đi từ tim xe ra ngoài; trả về (vị trí biên hợp pháp theo hệ thân xe, loại biên)."""
         if not side:
             return None, 'none'
         prev = 0.0
+        crossed_dashed = 0
         for ln in side:
+            if prev != 0.0 and abs(ln.d_ego_m - prev) < 2.0:
+                # Hai vạch quá sát nhau (< 2.0m, không phải bề rộng làn chuẩn) → bỏ qua vạch nhiễu
+                continue
             if abs(ln.d_ego_m - prev) > self.LANE_WIDTH_DEFAULT + 1.5 and prev != 0.0:
                 # Khoảng trống quá lớn giữa 2 vạch (mất vạch) → dừng ở 1 làn chuẩn sau vạch đứt cuối
                 return prev + sign * self.LANE_WIDTH_DEFAULT, 'assumed'
@@ -271,10 +285,17 @@ class RealtimeYellowLineDetector:
             if ln.line_type == LineType.SOLID:
                 return ln.d_ego_m, 'solid'
             prev = ln.d_ego_m
-        # Vạch ngoài cùng nhìn thấy là vạch ĐỨT → còn 1 làn cùng chiều phía sau (ngoài tầm nhìn)
+            crossed_dashed += 1
+            if crossed_dashed >= 1:
+                # Chỉ mở rộng tối đa 1 làn kế bên qua vạch trắng đứt để tránh cộng dồn nhiều làn giả trong giao lộ
+                break
+        if prev == 0.0:
+            return None, 'none'
+        # Vạch ngoài cùng nhìn thấy là vạch ĐỨT → cộng tối đa 1 làn cùng chiều phía sau
         far = prev + sign * self.LANE_WIDTH_DEFAULT
-        if abs(far) > self.BEV_LAT - 0.5:
-            far = sign * (self.BEV_LAT - 0.5)
+        max_lat = 5.25 if (sign < 0 and not has_yellow) else (self.BEV_LAT - 0.5)
+        if abs(far) > max_lat:
+            far = sign * max_lat
         return far, 'assumed'
 
     def _find_lines(self, bev: np.ndarray, color: str) -> List[LaneLine]:
@@ -302,7 +323,7 @@ class RealtimeYellowLineDetector:
         nz_r, nz_c = np.nonzero(bev_clean)
         n_win = 18
         win_h = H // n_win
-        margin = int(0.35 / self.BEV_RES)
+        margin = int(0.65 / self.BEV_RES)   # Mở rộng margin 0.65m để bắt liền mạch các vệt vạch đứt cách nhau
         out: List[LaneLine] = []
         for base in peaks:
             cur = float(base)
@@ -319,24 +340,24 @@ class RealtimeYellowLineDetector:
                     cur = mc + step
                     xs.append(nz_c[m]); ys.append(nz_r[m])
                 else:
-                    step *= 0.5
                     cur += step
-            if len(xs) < 3:
+            if len(xs) < 2:
                 continue
             xs_a, ys_a = np.concatenate(xs), np.concatenate(ys)
             x_min = self._bev_row_to_x(float(np.max(ys_a)))
             x_max = self._bev_row_to_x(float(np.min(ys_a)))
-            if x_min > 8.5 or (x_max - x_min) < 4.5:
+            # Vạch đứt có thể chỉ xuất hiện 1 nét ~2.0m trong tầm quét gần
+            if x_min > 8.5 or (x_max - x_min) < 1.8:
                 continue
             poly = np.poly1d(np.polyfit(ys_a, xs_a, 1))
-            if np.std(xs_a - poly(ys_a)) > 0.32 / self.BEV_RES:
+            if np.std(xs_a - poly(ys_a)) > 0.35 / self.BEV_RES:
                 continue
             # Tỷ lệ lấp đầy theo từng hàng dọc theo vạch để phân biệt chuẩn xác vạch LIỀN và vạch ĐỨT
             r_span = np.arange(int(np.min(ys_a)), int(np.max(ys_a)) + 1)
             c_pred = np.clip(np.round(poly(r_span)).astype(int), 6, W - 7)
             row_hit = [bool(np.any(bev_clean[rr, cc - 6:cc + 7] > 0)) for rr, cc in zip(r_span, c_pred)]
             fill = float(np.sum(row_hit)) / float(H)
-            if fill < 0.22:
+            if fill < 0.10:
                 continue
             # Ngoại suy tuyến tính vùng gần về vị trí tâm xe (sau camera FRONT_CAM_X_M)
             near = self._bev_row_to_x(ys_a) < 11.0
@@ -349,7 +370,7 @@ class RealtimeYellowLineDetector:
         return out
 
     # ------------------------------------------------------------------ MAP FALLBACK
-    def _map_fallback(self, result: YellowLineResult, ego_vehicle, carla_map, ref_xy):
+    def _map_fallback(self, result: YellowLineResult, ego_vehicle, carla_map, ref_xy, ref_theta=None):
         try:
             import carla
             ego_loc = ego_vehicle.get_location()
@@ -358,7 +379,16 @@ class RealtimeYellowLineDetector:
             if wp0 is None:
                 return
             solid = (carla.LaneMarkingType.Solid, carla.LaneMarkingType.SolidSolid, carla.LaneMarkingType.SolidBroken)
-            d_left = -wp0.lane_width / 2.0
+
+            if ref_xy is not None:
+                th_ref = float(ref_theta) if ref_theta is not None else math.radians(wp0.transform.rotation.yaw)
+                nx_ref, ny_ref = -math.sin(th_ref), math.cos(th_ref)
+                loc0 = wp0.transform.location
+                d_center = (loc0.x - float(ref_xy[0])) * nx_ref + (loc0.y - float(ref_xy[1])) * ny_ref
+            else:
+                d_center = 0.0
+
+            d_left = d_center - wp0.lane_width / 2.0
             wp, is_yel, yel_solid = wp0, False, False
             while True:
                 lm = wp.left_lane_marking
@@ -371,7 +401,7 @@ class RealtimeYellowLineDetector:
                     wp = nl
                 else:
                     break
-            d_right = wp0.lane_width / 2.0
+            d_right = d_center + wp0.lane_width / 2.0
             wp = wp0
             while True:
                 nr = wp.get_right_lane()
@@ -380,13 +410,19 @@ class RealtimeYellowLineDetector:
                     wp = nr
                 else:
                     break
+
+            if getattr(wp0, 'is_junction', False):
+                d_left = min(d_left, -5.25)
+                d_right = max(d_right, 4.50)
+                is_yel, yel_solid = False, False
+
             yaw = math.radians(wp0.transform.rotation.yaw)
             loc = wp0.transform.location
-            d_lat_ego = -math.sin(yaw) * (ego_loc.x - loc.x) + math.cos(yaw) * (ego_loc.y - loc.y)
+            d_lat_ego = d_center + (-math.sin(yaw) * (ego_loc.x - loc.x) + math.cos(yaw) * (ego_loc.y - loc.y))
 
             clr_l = self.r_clear_yellow if (is_yel and yel_solid) else self.r_clearance
-            result.road_min_m = float(d_left + clr_l)
-            result.road_max_m = float(d_right - self.r_clearance)
+            result.road_min_m = float(min(d_left + clr_l, -0.45))
+            result.road_max_m = float(max(d_right - self.r_clearance, 0.45))
             result.d_right_line_m = float(d_right - d_lat_ego)
             if is_yel:
                 result.line_type = LineType.SOLID if yel_solid else LineType.DASHED

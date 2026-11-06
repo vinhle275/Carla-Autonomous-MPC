@@ -1,5 +1,6 @@
 import os
 import sys
+import csv
 
 # Khắc phục triệt để xung đột Qt plugins do opencv-python (cv2) gây ra trên Linux / WSL
 for _qt_var in ["QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"]:
@@ -291,6 +292,39 @@ class Logger:
         summary_path = os.path.join(save_dir, 'summary_report.png')
         fig_summary.savefig(summary_path, dpi=300, bbox_inches='tight')
         plt.close(fig_summary)
+
+        # Lưu telemetry dạng CSV để phục vụ phân tích định lượng
+        telemetry_csv = os.path.join(save_dir, 'simulation_telemetry.csv')
+        try:
+            with open(telemetry_csv, mode='w', newline='') as tf:
+                writer = csv.writer(tf)
+                writer.writerow([
+                    'time_s', 'x', 'y', 'v', 'theta_deg',
+                    'x_ref', 'y_ref', 'v_ref', 'theta_ref_deg',
+                    'steer', 'throttle', 'brake', 'cost',
+                    'pos_error_m', 'lat_error_m', 'heading_error_deg'
+                ])
+                for idx_row in range(min_length):
+                    writer.writerow([
+                        round(float(time_axis[idx_row]), 3),
+                        round(float(x_data[idx_row]), 3),
+                        round(float(y_data[idx_row]), 3),
+                        round(float(v_data[idx_row]), 3),
+                        round(float(theta_data[idx_row]), 2),
+                        round(float(x_ref_data[idx_row]), 3),
+                        round(float(y_ref_data[idx_row]), 3),
+                        round(float(v_ref_data[idx_row]), 3),
+                        round(float(theta_ref_data[idx_row]), 2),
+                        round(float(steering_data[idx_row]), 4),
+                        round(float(throttle_data[idx_row]), 4),
+                        round(float(brake_data[idx_row]), 4),
+                        round(float(cost_data[idx_row]), 2),
+                        round(float(pos_errors[idx_row]), 4),
+                        round(float(lat_errors[idx_row]), 4),
+                        round(float(heading_errors_deg[idx_row]), 2)
+                    ])
+        except Exception as _csv_err:
+            print(f"[LOGGER] Không thể lưu telemetry CSV: {_csv_err}")
 
         print(f"\n[LOGGER] Đã tự động lưu thành công toàn bộ {6} biểu đồ vào thư mục:")
         print(f"         📁 {save_dir}")

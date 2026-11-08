@@ -36,6 +36,7 @@ from src.config import (
     YELLOW_H_LOW, YELLOW_H_HIGH, YELLOW_S_LOW, YELLOW_V_LOW,
     WHITE_S_HIGH, WHITE_V_LOW,
     EGO_HALF_WIDTH_M,
+    OBSTACLE_AVOIDANCE_MARGIN_M,
     YELLOW_LINE_CLEARANCE_M,
     FRONT_CAM_X_M, FRONT_CAM_Z_M, FRONT_CAM_PITCH_DEG, FRONT_CAM_FOV_DEG,
 )
@@ -86,7 +87,7 @@ class RealtimeYellowLineDetector:
         self.debug_draw = debug_draw
         self.road_half_w = road_half_w
         self.img_w, self.img_h = img_w, img_h
-        self.r_clearance = float(EGO_HALF_WIDTH_M + 0.08)       # nửa xe + lề biên đường
+        self.r_clearance = float(EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M)  # nửa xe + lề biên đường (1.35m)
         self.r_clear_yellow = float(EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
 
         self.bev_w = int(round(2 * self.BEV_LAT / self.BEV_RES))                       # 320
@@ -404,6 +405,9 @@ class RealtimeYellowLineDetector:
             d_right = d_center + wp0.lane_width / 2.0
             wp = wp0
             while True:
+                rm = wp.right_lane_marking
+                if rm and rm.type in solid:
+                    break
                 nr = wp.get_right_lane()
                 if nr is not None and nr.lane_type == carla.LaneType.Driving and nr.lane_id * wp0.lane_id > 0:
                     d_right += nr.lane_width

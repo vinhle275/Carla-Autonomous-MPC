@@ -46,6 +46,45 @@ def load_csv_trajectory(filepath=None):
             v_ref = v_ref * scale_factor
             print(f"[SPEED UP] Đã tự động nâng vận tốc tối đa trong file CSV lên {TARGET_SPEED_MS:.1f} m/s ({TARGET_SPEED_MS * 3.6:.1f} km/h).")
 
+    # Làm mượt vận tốc tham chiếu tại các khúc cua (khử nhiễu "hố kép" do đạo hàm bậc 2 tại điểm nối Bezier):
+    # Giữ vận tốc vào cua ổn định (~5.2 m/s) xuyên suốt đỉnh cua và chuyển tiếp gia/giảm tốc êm ái
+    if len(x_traj) > 50:
+        ds_arr = np.hypot(np.diff(x_traj), np.diff(y_traj))
+        s_cum = np.concatenate(([0.0], np.cumsum(ds_arr)))
+        ds_step = np.append(ds_arr, ds_arr[-1])
+
+        win_k = 35  # Cửa sổ ~3.5m tính độ cong dây cung hiệu dụng, triệt tiêu gai độ cong tại mút nối thẳng-cong
+        pad_k = win_k // 2
+        th_pad = np.pad(theta_traj, pad_k, mode='edge')
+        s_pad = np.pad(s_cum, pad_k, mode='edge')
+        dth_win = np.abs(th_pad[2 * pad_k:] - th_pad[:-2 * pad_k])
+        ds_win = np.maximum(s_pad[2 * pad_k:] - s_pad[:-2 * pad_k], 1.0)
+        kappa_eff = dth_win / ds_win
+
+        a_lat_comfort = 4.2  # Gia tốc hướng tâm êm ái khi vào cua (m/s^2)
+        v_max_target = float(np.max(v_ref)) if len(v_ref) > 0 else TARGET_SPEED_MS
+        v_min_corner = min(6.0, v_max_target)
+        v_curve = np.sqrt(a_lat_comfort / np.maximum(kappa_eff, 1e-4))
+        v_smooth = np.clip(v_curve, v_min_corner, v_max_target)
+
+        # Chỉ làm phẳng "hố kép" (valley fill) bên trong phạm vi thực của khúc cua (kappa_eff > 0.03)
+        # để không làm lan vùng tốc độ thấp ra đoạn đường thẳng trước và sau khúc cua
+        pad_m = 30
+        vp_pad = np.pad(v_smooth, pad_m, mode='edge')
+        v_valley = np.array([np.min(vp_pad[i:i + 2 * pad_m + 1]) for i in range(len(v_smooth))])
+        in_curve_mask = kappa_eff > 0.03
+        v_smooth = np.where(in_curve_mask, v_valley, v_smooth)
+
+        # Quy hoạch Forward-Backward giới hạn gia tốc dọc mượt mà ngay sát cửa vào/ra cua
+        a_dec_smooth = 3.5  # m/s^2
+        a_acc_smooth = 4.5  # m/s^2
+        for i in range(len(v_smooth) - 2, -1, -1):
+            v_smooth[i] = min(v_smooth[i], math.sqrt(v_smooth[i + 1] ** 2 + 2.0 * a_dec_smooth * float(ds_step[i])))
+        for i in range(1, len(v_smooth)):
+            v_smooth[i] = min(v_smooth[i], math.sqrt(v_smooth[i - 1] ** 2 + 2.0 * a_acc_smooth * float(ds_step[i - 1])))
+
+        v_ref = v_smooth
+
     print(f"[LOAD TRAJECTORY] Đã tải thành công {len(x_traj)} waypoints từ: {filepath}")
     return x_traj, y_traj, theta_traj, v_ref
 

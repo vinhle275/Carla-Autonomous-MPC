@@ -134,7 +134,7 @@ def main():
     if USE_LINEARIZED_QP_MPC:
         print("[THUẬT TOÁN] Sử dụng Bộ điều khiển Tuyến tính hóa lặp (Slack QP-MPC).")
         mpc_controller = LinearizedMpcController(horizon=N, sample_time=dt)
-        mpc_controller.set_global_trajectory(x_traj, y_traj, theta_traj)
+        mpc_controller.set_global_trajectory(x_traj, y_traj, theta_traj, v_ref_traj)
     else:
         print("[THUẬT TOÁN] Sử dụng Bộ điều khiển NMPC phi tuyến truyền thống.")
         mpc_controller = MpcController(horizon=N, dt=dt)

@@ -60,6 +60,7 @@ class LinearizedMpcController:
         self.is_roadblock = False
         self.roadblock_barrier_dist = None
         self.roadblock_reason = None
+        self.roadblock_latched_ids = set()  # Ghi nhớ ID vật cản đã kích hoạt Roadblock để không nhả phanh giữa chừng
         self.last_log_state = None  # Lưu trạng thái gần nhất để chỉ in log khi có thay đổi quyết định
 
         # Quỹ đạo toàn cục & độ dài cung Frenet
@@ -95,17 +96,19 @@ class LinearizedMpcController:
         self.x_nom = None
         self.u_nom = None
         self.u_prev = np.zeros(2)
+        self.roadblock_latched_ids = set()
         self.control_buffer = {
             "acceleration": [0.0] * self.horizon,
             "wheel_angle": [0.0] * self.horizon
         }
         self.buffer_index = 0
 
-    def set_global_trajectory(self, x_traj, y_traj, theta_traj):
+    def set_global_trajectory(self, x_traj, y_traj, theta_traj, v_traj=None):
         """Thiết lập quỹ đạo toàn cục và tính trước độ dài cung tích lũy s_traj"""
         self.x_traj = np.array(x_traj, dtype=float)
         self.y_traj = np.array(y_traj, dtype=float)
         self.theta_traj = np.array(theta_traj, dtype=float)
+        self.v_traj = np.array(v_traj, dtype=float) if v_traj is not None else None
         if len(self.x_traj) > 1:
             dx = np.diff(self.x_traj)
             dy = np.diff(self.y_traj)
@@ -425,23 +428,27 @@ class LinearizedMpcController:
                 best_gap = (g_low, g_high)
         return best_d, best_gap
 
-    def calc_span_obstacle_weight(self, s_query, s_rear, s_front):
+    def calc_span_obstacle_weight(self, s_query, s_rear, s_front, min_s_app_start=None):
         """
         Hàm trọng số S-Curve mượt mà theo khoảng dọc [s_rear, s_front]:
         - Mở lái hoàn tất trước mũi xe: s_hold_start = s_rear - EGO_FRONT_OVERHANG_M - OBSTACLE_APPROACH_MARGIN_M
         - Điểm bắt đầu mở lái dốc thoai thoải: s_app_start = s_hold_start - OBSTACLE_APPROACH_RAMP_M
+          (Nếu có vật cản phía trước khác làn vừa đi qua, kẹp s_app_start >= min_s_app_start để không đè lên vật cản trước)
         - Giữ làn né 100% đến khi thoát thân xe: s_hold_end = s_front + OBSTACLE_HOLD_DISTANCE_M
         - Trả lái êm ái về tim đường: s_ret_end = s_hold_end + OBSTACLE_RETURN_RAMP_M
         """
         s_hold_start = s_rear - EGO_FRONT_OVERHANG_M - OBSTACLE_APPROACH_MARGIN_M
         s_app_start = s_hold_start - OBSTACLE_APPROACH_RAMP_M
+        if min_s_app_start is not None and min_s_app_start > s_app_start:
+            s_app_start = min(float(min_s_app_start), s_hold_start - 4.0)
         s_hold_end = s_front + OBSTACLE_HOLD_DISTANCE_M
         s_ret_end = s_hold_end + OBSTACLE_RETURN_RAMP_M
 
         if s_query < s_app_start:
             return 0.0
         elif s_query < s_hold_start:
-            u = (s_query - s_app_start) / max(OBSTACLE_APPROACH_RAMP_M, 1.0)
+            ramp_len = max(s_hold_start - s_app_start, 1.0)
+            u = (s_query - s_app_start) / ramp_len
             return 0.5 * (1.0 - math.cos(math.pi * u))
         elif s_query <= s_hold_end:
             return 1.0
@@ -582,7 +589,7 @@ class LinearizedMpcController:
                 committed_sign = -1.0 if d_ego < 0 else 1.0
                 committed_d = d_ego
 
-        # Nếu chưa khóa hướng né, nhìn trước trong cửa sổ 16m kể từ lát cắt đầu tiên để chọn hành lang chung tối ưu
+        # Nếu chưa khóa hướng né, chỉ xét mặt cắt đầu tiên (cùng tiết diện <= 2.5m) để chọn hướng ưu tiên
         initial_pref_sign = committed_sign
         if initial_pref_sign is None and slices:
             s0_rear = slices[0]['s_rear']
@@ -590,7 +597,7 @@ class LinearizedMpcController:
             s0_yellow_limit = s0_road_min if s0_yl else (-1.75 + EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
             lookahead_blocked = []
             for sl in slices:
-                if sl['s_rear'] <= s0_rear + 16.0:
+                if sl['s_rear'] <= s0_rear + 2.5:
                     lookahead_blocked.extend(sl['blocked'])
             common_init_gaps = self.find_free_gaps_in_corridor(lookahead_blocked, s0_road_min, s0_road_max, min_gap_width=min_gap_width)
             if common_init_gaps:
@@ -608,6 +615,7 @@ class LinearizedMpcController:
         curr_d_target = committed_d
         slice_plans = []
         blocking_slice = None
+        prev_slice_info = None
 
         for sl in slices:
             sl_road_min, sl_road_max, sl_yl = self.get_legal_corridor_bounds(s=sl['s_rear'])
@@ -621,6 +629,19 @@ class LinearizedMpcController:
 
             # Chỉ kiểm tra Roadblock đối với lát cắt nằm ở phía trước tâm xe (không báo dừng với lát cắt xe đang đi ngang sườn)
             is_ahead_of_ego = (sl['s_rear'] >= s_ego + 0.5)
+
+            # Nếu lát cắt này đã từng kích hoạt Staggered Roadblock trước đó (đã chốt phanh dừng), giữ nguyên trạng thái dừng
+            if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego and (affects_lane or not gaps):
+                if any(o.get('id') in self.roadblock_latched_ids for o in sl['obs_list'] if o.get('id') is not None):
+                    self.is_roadblock = True
+                    self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                    if not self.roadblock_reason:
+                        self.roadblock_reason = (
+                            f"PHONG TỎA ĐƯỜNG SO LE (STAGGERED ROADBLOCK) tại s={sl['s_rear']:.1f}m: "
+                            f"Giữ trạng thái phanh dừng an toàn trước vật cản chặn làn."
+                        )
+                    blocking_slice = sl
+                    break
 
             # Kiểm tra xem lát cắt này có bị ép phải đi cùng phía curr_sign hay không
             # Chỉ ép hướng né khi bản thân lát cắt thực sự chặn đường tham chiếu (affects_lane)
@@ -654,6 +675,9 @@ class LinearizedMpcController:
                 if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                    for o in sl['obs_list']:
+                        if o.get('id') is not None:
+                            self.roadblock_latched_ids.add(o['id'])
                     if sl_yl:
                         d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else f"{sl_road_min:.2f}m"
                         self.roadblock_reason = (
@@ -671,7 +695,7 @@ class LinearizedMpcController:
 
             enforce_sign = curr_sign if must_keep_side else None
 
-            d_target, _ = self.select_optimal_shift_from_gaps(
+            d_target, best_gap = self.select_optimal_shift_from_gaps(
                 gaps,
                 preferred_sign=curr_sign,
                 enforce_sign=enforce_sign,
@@ -685,7 +709,7 @@ class LinearizedMpcController:
             # trong [sl_road_min, sl_road_max] và khoảng cách dọc còn đủ (>= 4.5m), cho phép đổi sang làn trống
             dist_to_sl = (sl['s_rear'] - EGO_FRONT_OVERHANG_M) - s_ego
             if d_target is None and enforce_sign is not None and dist_to_sl >= 4.5 and prev_s_front is None:
-                d_target, _ = self.select_optimal_shift_from_gaps(
+                d_target, best_gap = self.select_optimal_shift_from_gaps(
                     gaps,
                     preferred_sign=None,
                     enforce_sign=None,
@@ -702,6 +726,9 @@ class LinearizedMpcController:
                 if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                    for o in sl['obs_list']:
+                        if o.get('id') is not None:
+                            self.roadblock_latched_ids.add(o['id'])
                     if sl_yl:
                         d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else f"{sl_road_min:.2f}m"
                         self.roadblock_reason = (
@@ -718,9 +745,74 @@ class LinearizedMpcController:
                     break
                 continue
 
+            actual_d_target = d_target if (affects_lane or must_keep_side) else 0.0
+            if best_gap is None:
+                best_gap = gaps[0]
+
+            # Kiểm tra khả thi hình học dọc giữa 2 lát cắt vật cản so le (Staggered Obstacles):
+            # Kể cả khi lát cắt trước (prev_slice_info) nằm ở làn bên cạnh (actual_d_target == 0.0),
+            # nó vẫn khóa không cho xe chuyển sang làn đó cho tới khi đuôi xe vượt qua prev_slice_info['s_front']!
+            min_s_app_start = None
+            if prev_slice_info is not None:
+                prev_gap = prev_slice_info['gap']
+                prev_d = prev_slice_info['d_target']
+                ov_low = max(prev_gap[0], best_gap[0])
+                ov_high = min(prev_gap[1], best_gap[1])
+                has_common_corridor = (ov_high - ov_low) >= min_gap_width
+                dd_between = abs(actual_d_target - prev_d)
+                ds_gap = sl['s_rear'] - prev_slice_info['s_front']
+                ds_min_weave = (
+                    EGO_FRONT_OVERHANG_M + EGO_REAR_OVERHANG_M + OBSTACLE_APPROACH_MARGIN_M
+                    + max(7.5, 4.0 * dd_between)
+                )
+                if (not has_common_corridor or dd_between > 0.85) and ds_gap < ds_min_weave:
+                    if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
+                        self.is_roadblock = True
+                        self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                        self.roadblock_reason = (
+                            f"PHONG TỎA ĐƯỜNG SO LE (STAGGERED ROADBLOCK) tại s={sl['s_rear']:.1f}m: "
+                            f"Khoảng cách dọc giữa 2 vật cản so le (Δs={ds_gap:.1f}m < {ds_min_weave:.1f}m) "
+                            f"không đủ để lách ngang Δd={dd_between:.2f}m an toàn; dừng xe an toàn!"
+                        )
+                        for o in sl['obs_list']:
+                            if o.get('id') is not None:
+                                self.roadblock_latched_ids.add(o['id'])
+                                if o['id'] in self.active_chain:
+                                    del self.active_chain[o['id']]
+                        blocking_slice = sl
+                        break
+                elif (not has_common_corridor or dd_between > 0.85):
+                    min_s_app_start = prev_slice_info['s_front'] + EGO_REAR_OVERHANG_M
+
+            # Kiểm tra khả thi hình học dọc trực tiếp từ vị trí xe hiện tại tới lát cắt chặn làn:
+            dd_ego = abs(actual_d_target - d_ego)
+            ds_min_ego = OBSTACLE_APPROACH_MARGIN_M + 3.2 * dd_ego
+            if (affects_lane or not (best_gap[0] - 0.15 <= d_ego <= best_gap[1] + 0.15)) and dd_ego > 1.10 and dist_to_sl < ds_min_ego:
+                if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
+                    self.is_roadblock = True
+                    self.roadblock_barrier_dist = max(0.0, dist_to_sl)
+                    self.roadblock_reason = (
+                        f"KHOẢNG CÁCH DỌC QUÁ NGẮN ĐỂ ĐẢO LÀN ({dist_to_sl:.1f}m < {ds_min_ego:.1f}m cho độ lệch ngang {dd_ego:.2f}m) "
+                        f"tại s={sl['s_rear']:.1f}m; dừng xe an toàn!"
+                    )
+                    for o in sl['obs_list']:
+                        if o.get('id') is not None:
+                            self.roadblock_latched_ids.add(o['id'])
+                            if o['id'] in self.active_chain:
+                                del self.active_chain[o['id']]
+                    blocking_slice = sl
+                    break
+
             sl['gaps'] = gaps
-            sl['d_target'] = d_target if (affects_lane or must_keep_side) else 0.0
+            sl['d_target'] = actual_d_target
             sl['affects_lane'] = affects_lane or must_keep_side
+            sl['min_s_app_start'] = min_s_app_start
+            prev_slice_info = {
+                's_front': sl['s_front'],
+                'gap': best_gap,
+                'd_target': actual_d_target,
+                'obs_list': sl['obs_list'],
+            }
             if abs(sl['d_target']) > 0.05:
                 curr_sign = -1.0 if sl['d_target'] < 0 else 1.0
                 curr_d_target = sl['d_target']
@@ -734,6 +826,7 @@ class LinearizedMpcController:
             d_target = sl['d_target']
             side_sign = -1.0 if d_target < 0 else 1.0
             A_shift = abs(d_target)
+            min_s_app = sl.get('min_s_app_start')
             for o in sl['obs_list']:
                 oid = o['id']
                 if oid not in self.active_chain:
@@ -748,7 +841,8 @@ class LinearizedMpcController:
                         's_rear': o['s_rear'], 's_front': o['s_front'],
                         'd_min': o['d_min'], 'd_max': o['d_max'],
                         'side_sign': side_sign, 'A_shift': A_shift,
-                        'd_target': d_target
+                        'd_target': d_target,
+                        'min_s_app_start': min_s_app,
                     }
                 else:
                     self.active_chain[oid]['x'] = o['x']
@@ -757,6 +851,7 @@ class LinearizedMpcController:
                     self.active_chain[oid]['s_front'] = o['s_front']
                     self.active_chain[oid]['d_min'] = o['d_min']
                     self.active_chain[oid]['d_max'] = o['d_max']
+                    self.active_chain[oid]['min_s_app_start'] = min_s_app
                     if (self.active_chain[oid]['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego) > lock_dist:
                         self.active_chain[oid]['side_sign'] = side_sign
                         self.active_chain[oid]['A_shift'] = A_shift
@@ -785,6 +880,7 @@ class LinearizedMpcController:
             i_end = i_start
             group_sign = chain_list[i_start]['side_sign']
             max_A = chain_list[i_start]['A_shift']
+            grp_min_s_app = chain_list[i_start].get('min_s_app_start')
             while i_end + 1 < len(chain_list):
                 nxt = chain_list[i_end + 1]
                 gap_s = nxt['s_rear'] - chain_list[i_end]['s_front']
@@ -806,6 +902,7 @@ class LinearizedMpcController:
                 'side_sign': group_sign,
                 'A_shift': max_A,
                 'd_target': group_sign * max_A,
+                'min_s_app_start': grp_min_s_app,
             })
             i_start = i_end + 1
 
@@ -847,7 +944,10 @@ class LinearizedMpcController:
             min_neg_shift = 0.0
 
             for grp in corridor_groups:
-                w = self.calc_span_obstacle_weight(s_k, grp['s_rear'], grp['s_front'])
+                w = self.calc_span_obstacle_weight(
+                    s_k, grp['s_rear'], grp['s_front'],
+                    min_s_app_start=grp.get('min_s_app_start')
+                )
                 if w > 1e-4:
                     d_t = grp['d_target']
                     val = w * d_t
@@ -1117,8 +1217,10 @@ class LinearizedMpcController:
                     cost += 8000.0 * (eps_road_left[k] ** 2) + 800.0 * eps_road_left[k]
 
             # Chi phí bám quỹ đạo đồng bộ thời gian thực tại bước k (t = k * dt)
-            fine_x = FINE_X_COEF * (X[0, k] - x_ref[k]) ** 2
-            fine_y = FINE_Y_COEF * (X[1, k] - y_ref[k]) ** 2
+            xy_coef_x = (0.10 * FINE_X_COEF) if is_roadblock else FINE_X_COEF
+            xy_coef_y = (0.10 * FINE_Y_COEF) if is_roadblock else FINE_Y_COEF
+            fine_x = xy_coef_x * (X[0, k] - x_ref[k]) ** 2
+            fine_y = xy_coef_y * (X[1, k] - y_ref[k]) ** 2
             q_v = 120.0 if is_roadblock else FINE_V_COEF
             fine_v = q_v * (X[3, k] - v_ref[k]) ** 2
             fine_theta = FINE_THETA_COEF * (X[2, k] - theta_ref[k]) ** 2
@@ -1208,12 +1310,12 @@ class LinearizedMpcController:
                             d_lat_k = (X[0, k] - float(xr_base[k])) * nx_k + (X[1, k] - float(yr_base[k])) * ny_k
                             d_rk = d_ref_k_list[k]
 
-                            if abs(d_rk) > 0.05:
-                                pass_sign = 1.0 if d_rk > 0.0 else -1.0
-                            elif obs.get('side_sign') is not None:
+                            if obs.get('side_sign') is not None:
                                 pass_sign = float(obs['side_sign'])
+                            elif abs(d_rk - obs_d_center) > 0.05:
+                                pass_sign = 1.0 if d_rk > obs_d_center else -1.0
                             else:
-                                pass_sign = 1.0 if d_rk >= obs_d_center else -1.0
+                                pass_sign = 1.0 if d_rk >= 0.0 else -1.0
 
                             # Khi có vạch vàng SOLID: nếu đi bên trái vật cản sẽ ép tâm xe vượt quá horizon_road_min[k],
                             # bắt buộc phải đặt siêu phẳng đẩy sang bên PHẢI vật cản để không bao giờ xung đột với vạch vàng
@@ -1261,7 +1363,7 @@ class LinearizedMpcController:
           tránh hiện tượng điểm tham chiếu phóng quá xa kéo xe rẽ sớm hoặc trả làn sớm khi đang đi ngang vật cản.
         """
         if self.x_traj is None or self.s_traj is None or len(self.s_traj) < 2:
-            return x_ref, y_ref, theta_ref
+            return x_ref, y_ref, theta_ref, v_ref
 
         s_ego, d_ego, _, _, idx_ego = self.project_to_frenet(float(x_init[0]), float(x_init[1]), hint_idx=self.current_traj_idx)
         self.current_traj_idx = idx_ego
@@ -1289,7 +1391,11 @@ class LinearizedMpcController:
         x_sync = np.interp(s_queries, self.s_traj, self.x_traj)
         y_sync = np.interp(s_queries, self.s_traj, self.y_traj)
         theta_sync = np.interp(s_queries, self.s_traj, self.theta_traj)
-        return x_sync, y_sync, theta_sync
+        if getattr(self, 'v_traj', None) is not None and len(self.v_traj) == len(self.s_traj):
+            v_sync = np.interp(s_queries, self.s_traj, self.v_traj)
+        else:
+            v_sync = np.copy(v_ref)
+        return x_sync, y_sync, theta_sync, v_sync
 
     def solve(self, x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles=None):
         """
@@ -1300,7 +1406,7 @@ class LinearizedMpcController:
         4. Duy trì liên tục quỹ đạo danh định Warm-start (không reset đột ngột).
         5. Chạy vòng lặp giải QP.
         """
-        x_ref, y_ref, theta_ref = self._resample_ref_by_speed(
+        x_ref, y_ref, theta_ref, v_ref = self._resample_ref_by_speed(
             x_init, x_ref, y_ref, theta_ref, v_ref, detected_obstacles=detected_obstacles
         )
 
@@ -1370,6 +1476,10 @@ class LinearizedMpcController:
                 self.last_cost = cost_val
                 steer_rad = float(u_opt[0, 0])
                 acc_m_s2 = float(u_opt[1, 0])
+                if d_stop <= 18.0:
+                    req_decel = -(curr_v ** 2) / (2.0 * max(d_stop, 0.25)) - 0.35
+                    acc_m_s2 = min(acc_m_s2, max(MAX_CONTROL_BRAKING_M_S_2, req_decel))
+                self.u_prev = np.array([steer_rad, acc_m_s2], dtype=float)
                 self.x_nom[:, :-1] = x_opt[:, 1:]
                 self.x_nom[:, -1] = x_opt[:, -1]
                 self.u_nom[:, :-1] = u_opt[:, 1:]

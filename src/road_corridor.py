@@ -19,9 +19,9 @@ class RoadCorridorTracker:
     """
     def __init__(self, carla_map=None):
         self.carla_map = carla_map
-        # r_clearance cho mép mặt đường / vạch kẻ biên: Nửa thân xe (0.93m) + đệm lề (0.15m) = 1.08m
-        # Giúp tâm xe có đủ không gian tự nhiên trong làn mà không bao giờ bị bóp nghẹt thành dải hẹp
-        self.r_clearance = float(EGO_HALF_WIDTH_M + 0.15)
+        # r_clearance cho mép mặt đường / vạch kẻ biên: Nửa thân xe (1.0m) + đệm an toàn (0.35m) = 1.35m
+        # Với làn 3.5m (mép phải ở +5.25m khi đi làn 3), biên phải tâm xe là 5.25 - 1.35 = +3.90m, biên trái -0.45m
+        self.r_clearance = float(EGO_HALF_WIDTH_M + OBSTACLE_AVOIDANCE_MARGIN_M)
 
         # Mảng dữ liệu hành lang tiền tính toán dọc theo quỹ đạo toàn cục
         self.road_min_traj: Optional[np.ndarray] = None
@@ -102,6 +102,9 @@ class RoadCorridorTracker:
                     carla.LaneMarkingType.SolidSolid,
                     carla.LaneMarkingType.SolidBroken
                 )
+                if is_r_solid:
+                    # Gặp vạch trắng nét liền giới hạn biên phải của phần đường chạy xe -> dừng mở rộng
+                    break
 
                 next_r = curr_r.get_right_lane()
                 # Chỉ quét các làn Driving cùng chiều (loại bỏ Shoulder để xe không đi vào làn đỗ xe / lề cỏ)

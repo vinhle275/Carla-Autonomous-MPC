@@ -283,16 +283,27 @@ class CarlaSimulator:
     @staticmethod
     def process_control_inputs(wheel_angle_rad, acceleration_m_s_2, current_speed=0.0):
         # Chống trượt bánh (Traction Control) khi vừa khởi động từ tốc độ 0
-        if current_speed < 1.5:
+        if current_speed < 0.8:
             acceleration_m_s_2 = min(acceleration_m_s_2, 2.5)  # Khởi động mềm gia tốc max 2.5 m/s^2
 
         if acceleration_m_s_2 <= 0:
             throttle = 0.0
-            # Khi xe đang đi chậm (current_speed < 2.5 m/s):
-            # Nếu chỉ rà phanh nhẹ (acc >= -1.5), giữ brake tối đa 0.15 để không khựng dính bánh
-            # Nếu phanh dừng hẳn (acc < -1.5 hoặc dừng khẩn cấp), cho phép phanh dứt khoát để xe dừng hẳn về 0
-            if current_speed < 2.5 and acceleration_m_s_2 >= -1.5:
-                brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 0.15)
+            # Trong vật lý CARLA, khi nhả ga (throttle=0) lúc đang đánh lái vào cua, lực cản lăn + ma sát trượt ngang
+            # của lốp đã tự hãm xe ~ -1.5..-2.0 m/s^2. Nếu nhồi thêm phanh thủy lực lớn sẽ gây bó bánh (acc ~ -20 m/s^2)
+            # làm xe khựng/dừng giữa khúc cua.
+            # Do đó:
+            # - Giảm tốc nhẹ (acc >= -0.35): Nhả ga tự nhiên (coasting, brake = 0.0).
+            # - Rà phanh điều tốc vừa phải (-1.8 <= acc < -0.35 khi xe đang chạy > 0.8 m/s): Đệm phanh êm tối đa 0.12.
+            # - Phanh gắt / Dừng khẩn cấp (acc < -1.8 hoặc giữ xe đứng yên khi v <= 0.8 m/s): Cho phép phanh dứt khoát tới 1.0.
+            # Chỉ đệm phanh êm (brake <= 0.12) khi xe đang đánh lái vào cua (|wheel_angle| > 0.08 rad)
+            # để tránh khóa bánh trước trong cua; khi đi thẳng hoặc phanh dừng Roadblock thì phanh chuẩn xác theo gia tốc.
+            is_turning = abs(wheel_angle_rad) > 0.08
+            if is_turning and current_speed > 0.8 and acceleration_m_s_2 >= -0.35:
+                brake = 0.0
+            elif is_turning and current_speed > 0.8 and acceleration_m_s_2 >= -1.8:
+                brake = min((abs(acceleration_m_s_2) - 0.35) / (abs(MAX_BRAKING_M_S_2) * 2.2), 0.12)
+            elif current_speed < 2.5 and acceleration_m_s_2 >= -1.2:
+                brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 0.18)
             else:
                 brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
         else:

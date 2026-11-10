@@ -85,6 +85,9 @@ class RoadCorridorTracker:
             dx = wp.transform.location.x - x
             dy = wp.transform.location.y - y
             d_center = nx * dx + ny * dy
+            # Triệt tiêu sai số lệch tâm nhỏ (<= 0.40m) do làm mượt spline so với tim làn OpenDRIVE
+            if abs(d_center) <= 0.40:
+                d_center = 0.0
 
             curr_half_w = float(wp.lane_width / 2.0)
 
@@ -94,6 +97,8 @@ class RoadCorridorTracker:
             d_right_phys = d_center + curr_half_w
             d_right_legal = d_right_phys
             curr_r = wp
+            has_r_solid = False
+            found_r_lane = False
 
             while True:
                 rm = curr_r.right_lane_marking
@@ -104,6 +109,7 @@ class RoadCorridorTracker:
                 )
                 if is_r_solid:
                     # Gặp vạch trắng nét liền giới hạn biên phải của phần đường chạy xe -> dừng mở rộng
+                    has_r_solid = True
                     break
 
                 next_r = curr_r.get_right_lane()
@@ -115,6 +121,7 @@ class RoadCorridorTracker:
                     d_right_phys += w_r
                     d_right_legal += w_r
                     curr_r = next_r
+                    found_r_lane = True
                 else:
                     # Đã gặp mép ngoài cùng (Shoulder / Sidewalk / Curb / Hộ lan mép phải)
                     break
@@ -125,6 +132,8 @@ class RoadCorridorTracker:
             d_left_phys = d_center - curr_half_w
             d_left_legal = d_left_phys
             is_yellow_solid = False
+            has_l_solid = False
+            found_l_lane = False
             curr_l = wp
 
             while True:
@@ -149,10 +158,12 @@ class RoadCorridorTracker:
                         d_left_phys -= w_l
                         d_left_legal -= w_l
                         curr_l = next_l
+                        found_l_lane = True
                     else:
                         # Làn ngược chiều (Opposing traffic)
                         if is_l_yellow and is_l_solid:
                             is_yellow_solid = True
+                            has_l_solid = True
                             # Vạch vàng nét liền phân cách làn đối diện -> Dừng biên hợp pháp tại đây
                             break
                         elif is_l_broken:
@@ -160,25 +171,32 @@ class RoadCorridorTracker:
                             w_l = float(next_l.lane_width)
                             d_left_phys -= w_l
                             d_left_legal -= w_l
+                            found_l_lane = True
                             break
                         else:
                             if is_l_solid:
                                 is_yellow_solid = is_l_yellow
+                                has_l_solid = True
                             break
                 else:
                     # Gặp vỉa hè / dải phân cách cứng bên trái
                     if is_l_yellow and is_l_solid:
                         is_yellow_solid = True
+                        has_l_solid = True
+                    elif is_l_solid:
+                        has_l_solid = True
                     break
 
             # XỬ LÝ KHÔNG GIAN GIAO LỘ (JUNCTION / INTERSECTION):
             # Trong CARLA OpenDRIVE, các đường kết nối nội bộ trong giao lộ thường chỉ mô hình 1 làn ảo đơn lẻ
-            # khiến get_left_lane / get_right_lane trả về None. Tại đây mặt đường thực tế rất rộng rãi,
-            # không được phép bóp nghẹt hành lang khiến xe giật lái hoặc cản trở quỹ đạo vào cua.
+            # khiến get_left_lane / get_right_lane trả về None và không có vạch kẻ liền.
+            # Tuy nhiên nếu waypoint có vạch vàng nét liền thực sự hoặc đã xác định được cấu trúc làn bên cạnh
+            # (như đoạn đường thẳng có nhánh phụ nhập vào), TUYỆT ĐỐI giữ nguyên vạch vàng và bề rộng làn thực tế!
             if getattr(wp, 'is_junction', False):
-                d_left_legal = min(d_left_legal, -5.25)
-                d_right_legal = max(d_right_legal, 4.50)
-                is_yellow_solid = False
+                if not is_yellow_solid and not has_l_solid and not found_l_lane:
+                    d_left_legal = min(d_left_legal, -5.25)
+                if not has_r_solid and not found_r_lane:
+                    d_right_legal = max(d_right_legal, 4.50)
 
             # Giới hạn an toàn cho tâm xe Ego sau khi trừ clearance (thân xe + lề)
             road_min = d_left_legal + self.r_clearance

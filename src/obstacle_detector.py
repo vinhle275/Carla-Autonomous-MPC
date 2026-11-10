@@ -1,4 +1,5 @@
 import math
+import time
 import numpy as np
 import carla
 
@@ -41,6 +42,8 @@ class ObstacleDetector:
         # Bản đồ vật cản cục bộ có nhớ (Local Object Map)
         # Lưu trữ: actor_id -> obs_info dict
         self.tracked_obstacles = {}
+        # Lưu trạng thái vị trí bước trước để tính vận tốc thực (hỗ trợ cả vật cản dịch chuyển bằng set_transform)
+        self.prev_actor_states = {}
 
     def set_ego_vehicle(self, ego_vehicle):
         """Cập nhật đối tượng xe Ego khi được spawn"""
@@ -49,6 +52,7 @@ class ObstacleDetector:
     def clear_memory(self):
         """Xóa bộ nhớ theo dõi vật cản (khi reset mô phỏng)"""
         self.tracked_obstacles.clear()
+        self.prev_actor_states.clear()
 
     @staticmethod
     def get_closest_point_on_obb(px, py, box_center_x, box_center_y, box_yaw_rad, half_len, half_wid):
@@ -139,6 +143,29 @@ class ObstacleDetector:
 
             # Khoảng cách thô tới tâm
             dist_to_center = math.hypot(box_center_x - x_ego, box_center_y - y_ego)
+            if dist_to_center > (self.detection_range + half_len + 8.0):
+                continue
+
+            # Tính vận tốc thực của vật cản (hỗ trợ cả vật cản set_transform ngay từ bước đầu tiên lọt vào tầm quét)
+            now_t = time.time()
+            vx_obs, vy_obs = 0.0, 0.0
+            try:
+                vel_c = actor.get_velocity()
+                vx_obs = float(vel_c.x)
+                vy_obs = float(vel_c.y)
+            except Exception:
+                pass
+            prev_st = self.prev_actor_states.get(actor.id)
+            if prev_st is not None:
+                dt_obs = now_t - prev_st[2]
+                if 0.01 <= dt_obs <= 1.0:
+                    vx_fd = (box_center_x - prev_st[0]) / dt_obs
+                    vy_fd = (box_center_y - prev_st[1]) / dt_obs
+                    if math.hypot(vx_fd, vy_fd) > math.hypot(vx_obs, vy_obs) and math.hypot(vx_fd, vy_fd) < 40.0:
+                        vx_obs, vy_obs = vx_fd, vy_fd
+            self.prev_actor_states[actor.id] = (box_center_x, box_center_y, now_t)
+            obs_speed = math.hypot(vx_obs, vy_obs)
+
             if dist_to_center > (self.detection_range + half_len + 3.0):
                 continue
 
@@ -192,6 +219,10 @@ class ObstacleDetector:
                     'extent_x': half_len,
                     'extent_y': half_wid,
                     'box_yaw': box_yaw,
+                    'vx': vx_obs,
+                    'vy': vy_obs,
+                    'speed': obs_speed,
+                    'is_moving': obs_speed > 0.35,
                     'is_vehicle': 'vehicle' in actor.type_id,
                     'actor': actor,
                     'source': 'front_fov' if is_in_front_fov else 'surround_360'

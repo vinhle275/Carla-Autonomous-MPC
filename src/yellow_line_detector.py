@@ -386,39 +386,51 @@ class RealtimeYellowLineDetector:
                 nx_ref, ny_ref = -math.sin(th_ref), math.cos(th_ref)
                 loc0 = wp0.transform.location
                 d_center = (loc0.x - float(ref_xy[0])) * nx_ref + (loc0.y - float(ref_xy[1])) * ny_ref
+                if abs(d_center) <= 0.40:
+                    d_center = 0.0
             else:
                 d_center = 0.0
 
             d_left = d_center - wp0.lane_width / 2.0
             wp, is_yel, yel_solid = wp0, False, False
+            has_l_solid, found_l_lane = False, False
             while True:
                 lm = wp.left_lane_marking
                 if lm and lm.color == carla.LaneMarkingColor.Yellow:
                     is_yel, yel_solid = True, lm.type in solid
+                    has_l_solid = yel_solid
+                    break
+                if lm and lm.type in solid:
+                    has_l_solid = True
                     break
                 nl = wp.get_left_lane()
                 if nl is not None and nl.lane_type == carla.LaneType.Driving and nl.lane_id * wp0.lane_id > 0:
                     d_left -= nl.lane_width
                     wp = nl
+                    found_l_lane = True
                 else:
                     break
             d_right = d_center + wp0.lane_width / 2.0
             wp = wp0
+            has_r_solid, found_r_lane = False, False
             while True:
                 rm = wp.right_lane_marking
                 if rm and rm.type in solid:
+                    has_r_solid = True
                     break
                 nr = wp.get_right_lane()
                 if nr is not None and nr.lane_type == carla.LaneType.Driving and nr.lane_id * wp0.lane_id > 0:
                     d_right += nr.lane_width
                     wp = nr
+                    found_r_lane = True
                 else:
                     break
 
             if getattr(wp0, 'is_junction', False):
-                d_left = min(d_left, -5.25)
-                d_right = max(d_right, 4.50)
-                is_yel, yel_solid = False, False
+                if not (is_yel and yel_solid) and not has_l_solid and not found_l_lane:
+                    d_left = min(d_left, -5.25)
+                if not has_r_solid and not found_r_lane:
+                    d_right = max(d_right, 4.50)
 
             yaw = math.radians(wp0.transform.rotation.yaw)
             loc = wp0.transform.location

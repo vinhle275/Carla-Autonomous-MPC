@@ -1,0 +1,32 @@
+# ==============================================================================
+# TRỌNG SỐ TỐI ƯU HÓA QP-MPC (MPC OPTIMIZATION WEIGHTS)
+# ==============================================================================
+
+mpc:
+  horizon_N: 20                      # Độ dài chân trời dự đoán N (20 bước tại dt=0.05s ~ 1.0s)
+  sample_time_dt: 0.05               # Chu kỳ lấy mẫu thực tế của Process 2 (50Hz)
+  max_iterations: 1                  # Số vòng lặp tuyến tính hóa lặp (RTI)
+
+weights:
+  fine_x: 2.0                        # Phạt sai số tọa độ X dọc
+  fine_y: 2.0                        # Phạt sai số tọa độ Y dọc
+  fine_v: 12.0                       # Phạt sai số vận tốc dọc
+  fine_theta: 120.0                  # Phạt sai số góc hướng xe Theta
+  fine_lateral: 30.0                 # Phạt sai lệch vuông góc tâm làn Frenet
+  fine_steer: 25.0                   # Phạt biên độ góc lái
+  fine_acceleration: 2.0             # Phạt biên độ gia tốc
+  fine_steer_dot: 300.0              # Phạt tốc độ quay vô lăng (chống trễ pha)
+  fine_acc_dot: 50.0                 # Phạt độ giật dọc Jerk (da/dt)
+
+slack:
+  w_slack_quad: 20000.0              # Phạt bậc 2 biến bù nới lỏng siêu phẳng
+  w_slack_linear: 500.0              # Phạt bậc 1 biến bù (Exact Penalty)
+  w_road_right: 8000.0               # Phạt mép phải mặt đường / hộ lan
+  w_yellow_solid_quad: 25000.0       # Phạt bậc 2 lấn vạch vàng liền (cực nặng)
+  w_yellow_solid_linear: 2500.0      # Phạt bậc 1 lấn vạch vàng liền
+
+s_curve:
+  approach_ramp_m: 18.0              # Chiều dài dốc mở lái tiếp cận
+  approach_margin_m: 2.5             # Khoảng đệm trước đuôi vật cản
+  hold_distance_m: 4.0               # Khoảng đệm giữ làn sau mũi vật cản
+  return_ramp_m: 16.0                # Chiều dài dốc trả lái về tim đường

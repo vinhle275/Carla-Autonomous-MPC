@@ -1,0 +1,40 @@
+# CMake Build Output
+build/
+build_linux/
+build_win/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled Binaries & Libraries
+*.exe
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.obj
+*.o
+*.pdb
+
+# Python Cache & Eggs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+egg_cache/
+*.egg-info/
+dist/
+*.egg
+
+# IDE & Editor Configurations
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Logs
+*.log

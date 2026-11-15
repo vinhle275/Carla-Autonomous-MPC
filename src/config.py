@@ -17,8 +17,8 @@ PLOTS_DIR = os.path.abspath(
 )
 
 # --- CẤU HÌNH KẾT NỐI CARLA SERVER ---
-# CARLA_HOST = '172.20.240.1'    # Đổi thành '127.0.0.1' hoặc IP máy chủ CARLA nếu chạy WSL2/máy khác (vd: '172.20.240.1')
-CARLA_HOST = '127.0.0.1' 
+CARLA_HOST = '172.20.240.1'    # Đổi thành '127.0.0.1' hoặc IP máy chủ CARLA nếu chạy WSL2/máy khác (vd: '172.20.240.1')
+#CARLA_HOST = '127.0.0.1' 
 CARLA_PORT = 2000
 
 # --- VẬN TỐC THAM CHIẾU MONG MUỐN ---

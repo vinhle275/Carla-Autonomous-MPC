@@ -1,0 +1,32 @@
+# ==============================================================================
+# THÔNG SỐ VẬT LÝ XE & CẢM BIẾN (VEHICLE & SENSOR PARAMETERS)
+# ==============================================================================
+
+vehicle:
+  wheelbase_m: 2.875                 # Chiều dài cơ sở L (m)
+  front_overhang_m: 2.4              # Khoảng cách từ tâm xe tới cản trước (m)
+  rear_overhang_m: 2.4               # Khoảng cách từ tâm xe tới cản sau (m)
+  half_width_m: 1.0                  # Nửa chiều rộng xe (m)
+  max_steer_rad: 1.2217304763960306  # Góc lái tối đa (70 độ ~ 1.2217 rad)
+  max_acceleration_m_s2: 10.0        # Gia tốc tiến tối đa (m/s^2)
+  max_braking_m_s2: -4.1             # Gia tốc phanh hãm tối đa (m/s^2)
+  target_speed_m_s: 10.0             # Vận tốc mục tiêu danh định (m/s) ~ 36 km/h
+  caution_speed_m_s: 6.0             # Vận tốc cẩn trọng khi lách qua vật cản (m/s)
+
+sensor:
+  detection_range_m: 28.0            # Tầm quét xa tối đa phía trước (m)
+  fov_deg: 120.0                     # Góc mở trường nhìn phía trước (độ)
+  surround_range_m: 10.0             # Tầm quét 360 độ cự ly gần quanh thân xe (m)
+  track_drop_behind_m: 3.0           # Khoảng cách sau lưng xe để xóa vật cản (m)
+  obstacle_margin_m: 0.35            # Khoảng đệm an toàn cách mép vật cản (m)
+  yellow_clearance_m: 0.35           # Khoảng đệm an toàn cách vạch vàng liền (m)
+
+danger_zone:
+  width_m: 2.4                       # Bề rộng vùng nguy hiểm va chạm trước đầu xe (m)
+  length_m: 6.0                      # Chiều dài vùng nguy hiểm từ cản trước (m)
+  clear_hold_time_s: 2.0             # Thời gian giữ thông thoáng trước khi nhả phanh (s)
+  moving_speed_threshold_m_s: 0.2    # Ngưỡng vận tốc xác định vật cản đang di chuyển (m/s)
+
+roadblock:
+  safe_stop_distance_m: 5.5          # Khoảng cách dừng trước rào chắn vật cản (m)
+  deceleration_m_s2: 1.6             # Gia tốc hãm phanh êm ái khi dừng Roadblock (m/s^2)

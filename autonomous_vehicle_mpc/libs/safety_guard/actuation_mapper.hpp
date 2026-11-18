@@ -1,6 +1,7 @@
 // ==============================================================================
 // ACTUATION OUTPUT MAPPER (THROTTLE, BRAKE, STEER)
 // Modern C++20 | Traction Control, Anti-Lock Cornering, Static Holding
+// Synchronized with CarlaSimulator.process_control_inputs in carla_simulator.py
 // ==============================================================================
 
 #pragma once
@@ -22,8 +23,17 @@ class ActuationMapper {
 public:
     static ActuatorOutput map_controls(double wheel_angle_rad,
                                       double acceleration_m_s2,
-                                      double current_speed_m_s) {
+                                      double current_speed_m_s,
+                                      bool is_roadblock_latch = false) {
         ActuatorOutput out;
+
+        // 0. Chốt dừng tĩnh Roadblock (Limousine Static Hold): khóa thẳng lái, giữ phanh tĩnh 0.18
+        if (is_roadblock_latch || (current_speed_m_s < 0.20 && acceleration_m_s2 <= -1.0 && std::abs(wheel_angle_rad) < 0.02)) {
+            out.throttle = 0.0;
+            out.brake = 0.18;
+            out.steer = 0.0;
+            return out;
+        }
 
         // 1. Chống trượt bánh (Traction Control) khi vừa khởi động từ tốc độ 0
         if (current_speed_m_s < 0.8) {
@@ -39,14 +49,14 @@ public:
                 // Giảm tốc nhẹ khi ôm cua: Nhả ga tự nhiên (coasting), không đạp phanh
                 out.brake = 0.0;
             } else if (is_turning && current_speed_m_s > 0.8 && acceleration_m_s2 >= -1.8) {
-                // Rà phanh điều tốc vừa phải trong cua: Đệm phanh êm chống khóa bánh trước
+                // Rà phanh điều tốc vừa phải trong cua: Giới hạn phanh êm <= 0.12 chống khóa bánh
                 double b = (std::abs(acceleration_m_s2) - 0.35) / (std::abs(config::MAX_BRAKING_MS2) * 2.2);
                 out.brake = std::min(b, 0.12);
             } else if (current_speed_m_s < 2.5 && acceleration_m_s2 >= -1.2) {
-                // Giữ phanh tĩnh khi dừng Roadblock / tốc độ rất thấp
+                // Đệm phanh êm tốc độ thấp (Limousine Stop Feathering chuẩn carla_simulator.py): giới hạn <= 0.18
                 out.brake = std::min(std::abs(acceleration_m_s2 / config::MAX_BRAKING_MS2), 0.18);
             } else {
-                // Phanh gắt hoặc dừng khẩn cấp
+                // Khi chạy thẳng hoặc dừng Roadblock: Áp dụng đầy đủ lực phanh tỉ lệ
                 out.brake = std::min(std::abs(acceleration_m_s2 / config::MAX_BRAKING_MS2), 1.0);
             }
         } else {

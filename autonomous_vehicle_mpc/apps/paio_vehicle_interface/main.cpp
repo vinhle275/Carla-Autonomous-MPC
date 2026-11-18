@@ -1,6 +1,6 @@
 // ==============================================================================
 // PROCESS 1: PAIO_VehicleInterface_App (ASIL-D - 100Hz, dt=0.01s)
-// - CAN / CARLA State Acquisition (100Hz) & Downsample Publish to P2 (50Hz)
+// - CAN / CARLA State & Actor Acquisition (100Hz) & Publish to P2 (50Hz)
 // - Watchdog Safe-State Fail-Safe (100ms Timeout -> hold last_valid_steer + brake)
 // - Range Check & Physical Actuation (100Hz)
 // ==============================================================================
@@ -9,6 +9,7 @@
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <algorithm>
 #include "common/autosar_types.hpp"
 #include "common/config_constants.hpp"
 #include "ipc_transport/shared_memory_ipc.hpp"
@@ -22,7 +23,7 @@ int main(int argc, char* argv[]) {
               << "========================================================" << std::endl;
 
     std::string bridge_ip = "127.0.0.1";
-    int bridge_port = 2002;
+    int bridge_port = 20050;
     if (argc >= 2) bridge_ip = argv[1];
     if (argc >= 3) bridge_port = std::stoi(argv[2]);
 
@@ -34,8 +35,9 @@ int main(int argc, char* argv[]) {
                   << bridge_ip << ":" << bridge_port << ". Chạy chế độ mô phỏng SIL nội bộ." << std::endl;
     }
 
-    // Khởi tạo cổng ara::com Shared Memory
+    // Khởi tạo cổng ara::com Zero-Copy Shared Memory
     ipc::AraComPort<types::VehicleStateData> state_pub("VehicleStateService", true);
+    ipc::AraComPort<types::PerceptionSensorData> sensor_pub("PerceptionSensorService", true);
     ipc::AraComPort<types::ActuatorCommandData> cmd_sub("ActuatorCommandService", false);
 
     const auto loop_period = std::chrono::milliseconds(10); // 100Hz
@@ -52,18 +54,32 @@ int main(int argc, char* argv[]) {
         auto t_start = std::chrono::steady_clock::now();
         cycle_count++;
 
-        // 1.1 Đọc trạng thái xe từ HAL (100Hz)
+        // 1.1 Đọc trạng thái xe, hành lang bản đồ và khung hình camera từ HAL (100Hz)
         types::VehicleStateData state{};
-        bool read_ok = hal_client.read_vehicle_state(state, actors);
+        types::PerceptionSensorData sensor_pkt{};
+        bool read_ok = hal_client.read_vehicle_state(state, actors, &sensor_pkt);
         if (read_ok) {
-            state.timestamp_ns = ipc::get_current_time_ns();
+            uint64_t now_stamp = ipc::get_current_time_ns();
+            state.timestamp_ns = now_stamp;
             state.sequence_id = cycle_count;
-            state.is_valid = true;
+            state.is_valid = 1;
 
-            // Cứ mỗi 2 chu kỳ 100Hz (tức nhịp 50Hz), gửi bản tin sang Process 2
+            // Cứ mỗi 2 chu kỳ 100Hz (tức nhịp 50Hz), xuất bản tin sang Process 2 qua Shared Memory
             if (cycle_count % 2 == 0) {
                 state_pub.write(state);
+
+                sensor_pkt.timestamp_ns = now_stamp;
+                sensor_pkt.sequence_id = cycle_count;
+                uint32_t n_act = static_cast<uint32_t>(std::min(actors.size(), types::MAX_RAW_ACTORS));
+                sensor_pkt.num_actors = n_act;
+                for (uint32_t i = 0; i < n_act; ++i) {
+                    sensor_pkt.actors[i] = actors[i];
+                }
+                sensor_pkt.is_valid = 1;
+                sensor_pub.write(sensor_pkt);
             }
+        } else if (connected && !hal_client.is_connected()) {
+            break;
         }
 
         // 1.2 Đọc non-blocking lệnh chấp hành từ Process 2 (Core)
@@ -90,12 +106,12 @@ int main(int argc, char* argv[]) {
             current_cmd.is_emergency_stop = true;
         }
 
-        // 1.4 Range Check & Xuất lệnh vật lý xuống CARLA / CAN Bus
-        double throttle_out = std::clamp(current_cmd.throttle, 0.0, 1.0);
-        double brake_out = std::clamp(current_cmd.brake, 0.0, 1.0);
-        double steer_out = std::clamp(current_cmd.steer, -1.0, 1.0);
+        // 1.4 Range Check & Xuất lệnh vật lý kèm Telemetry xuống CARLA / CAN Bus
+        current_cmd.throttle = std::clamp(current_cmd.throttle, 0.0, 1.0);
+        current_cmd.brake = std::clamp(current_cmd.brake, 0.0, 1.0);
+        current_cmd.steer = std::clamp(current_cmd.steer, -1.0, 1.0);
 
-        hal_client.apply_actuator_control(throttle_out, brake_out, steer_out);
+        hal_client.apply_actuator_control(current_cmd);
 
         // Duy trì nhịp 100Hz chính xác
         auto t_end = std::chrono::steady_clock::now();

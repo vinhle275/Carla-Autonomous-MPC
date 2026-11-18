@@ -1,6 +1,6 @@
 // ==============================================================================
 // TRAJECTORY & SCENARIO CSV LOADER
-// Modern C++20 | Fast CSV parsing
+// Modern C++20 | Fast CSV parsing (sync with help_functions.py)
 // ==============================================================================
 
 #pragma once
@@ -11,6 +11,7 @@
 #include <sstream>
 #include <iostream>
 #include <cmath>
+#include <cctype>
 #include "frenet_utils.hpp"
 #include "config_constants.hpp"
 
@@ -63,11 +64,23 @@ public:
         }
 
         std::string line;
-        // Đọc header
-        if (!std::getline(file, line)) return traj;
+        bool is_first_line = true;
 
         while (std::getline(file, line)) {
             if (line.empty()) continue;
+            if (is_first_line) {
+                is_first_line = false;
+                // Đồng bộ với help_functions.py: nếu dòng đầu chứa ký tự chữ (header 'x,y,theta_rad,v_m_s') thì bỏ qua
+                bool has_alpha = false;
+                for (char ch : line) {
+                    if (std::isalpha(static_cast<unsigned char>(ch)) && ch != 'e' && ch != 'E') {
+                        has_alpha = true;
+                        break;
+                    }
+                }
+                if (has_alpha) continue;
+            }
+
             std::stringstream ss(line);
             std::string item;
             std::vector<double> vals;

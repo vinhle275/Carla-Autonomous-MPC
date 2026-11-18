@@ -3,7 +3,7 @@ REM ============================================================================
 REM AUTONOMOUS VEHICLE MPC - WINDOWS BUILD SCRIPT (MinGW UCRT64 + CMake)
 REM ==============================================================================
 
-set "PATH=D:\Appfile\Code\msys64\ucrt64\bin;C:\Program Files\CMake\bin;%PATH%"
+set "PATH=D:\Appfile\Code\msys64\ucrt64\bin;C:\msys64\ucrt64\bin;C:\Program Files\CMake\bin;%PATH%"
 cd /d "%~dp0"
 
 echo ====================================================================
@@ -11,9 +11,15 @@ echo   BIEN DICH HE THONG MO PHONG XE TU HANH C++ (AUTOSAR ADAPTIVE)
 echo ====================================================================
 
 REM Kiem tra neu thu muc build chua co hoac chua duoc cau hinh
-if not exist "build\build.ninja" if not exist "build\Makefile" (
+if not exist "build\build.ninja" if not exist "build\Makefile" if not exist "build\autonomous_vehicle_mpc.sln" (
     echo [CMAKE] Dang cau hinh he thong bien dich vao thu muc build/...
-    cmake -B build -G "MinGW Makefiles" -DCMAKE_CXX_COMPILER="D:/Appfile/Code/msys64/ucrt64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="D:/Appfile/Code/msys64/ucrt64/bin/mingw32-make.exe" -DCMAKE_BUILD_TYPE=Release
+    if exist "D:\Appfile\Code\msys64\ucrt64\bin\g++.exe" (
+        cmake -B build -G "MinGW Makefiles" -DCMAKE_CXX_COMPILER="D:/Appfile/Code/msys64/ucrt64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="D:/Appfile/Code/msys64/ucrt64/bin/mingw32-make.exe" -DCMAKE_BUILD_TYPE=Release
+    ) else if exist "C:\msys64\ucrt64\bin\g++.exe" (
+        cmake -B build -G "MinGW Makefiles" -DCMAKE_CXX_COMPILER="C:/msys64/ucrt64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="C:/msys64/ucrt64/bin/mingw32-make.exe" -DCMAKE_BUILD_TYPE=Release
+    ) else (
+        cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+    )
     if %ERRORLEVEL% neq 0 (
         echo [ERROR] Cau hinh CMake that bai!
         exit /b 1

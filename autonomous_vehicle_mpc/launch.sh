@@ -7,36 +7,32 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Tự động nạp CMake và g++ từ môi trường conda nếu chưa có trong PATH
+if [ -d "$HOME/miniconda3/envs/cpp_mpc_env/bin" ]; then
+    export PATH="$HOME/miniconda3/envs/cpp_mpc_env/bin:$PATH"
+fi
+
 echo "===================================================================="
 echo "  KHOI DONG HE THONG MO PHONG XE TU HANH C++ (AUTOSAR AP RUNTIME)   "
 echo "===================================================================="
 
 # Tự động phát hiện IP host Windows nếu chạy từ bên trong WSL2
 DEFAULT_HOST="127.0.0.1"
-if [ -f "/etc/resolv.conf" ]; then
+if [ -f "/etc/resolv.conf" ] && grep -qi microsoft /proc/version 2>/dev/null; then
     WSL_HOST=$(grep nameserver /etc/resolv.conf | awk '{print $2}')
     if [ -n "$WSL_HOST" ]; then
         DEFAULT_HOST="$WSL_HOST"
     fi
 fi
 
-# Tìm binary đã biên dịch
-TARGET_BIN=""
-if [ -f "build_linux/autonomous_mpc_unified" ]; then
-    TARGET_BIN="build_linux/autonomous_mpc_unified"
-elif [ -f "build/autonomous_mpc_unified" ]; then
-    TARGET_BIN="build/autonomous_mpc_unified"
-elif [ -f "build/autonomous_mpc_unified.exe" ]; then
-    TARGET_BIN="build/autonomous_mpc_unified.exe"
-fi
-
-if [ -z "$TARGET_BIN" ]; then
-    echo "[BUILD] Đang tiến hành biên dịch ứng dụng C++ cho Linux/WSL..."
+# Tự động cấu hình & biên dịch incremental cho Linux/WSL (chỉ mất ~0.1s nếu không có thay đổi code)
+if [ ! -f "build_linux/Makefile" ] && [ ! -f "build_linux/build.ninja" ]; then
+    echo "[BUILD] Đang cấu hình CMake cho Linux/WSL (build_linux/)..."
     mkdir -p build_linux
     cmake -B build_linux -DCMAKE_BUILD_TYPE=Release
-    cmake --build build_linux -j4
-    TARGET_BIN="build_linux/autonomous_mpc_unified"
 fi
+cmake --build build_linux -j4
+TARGET_BIN="build_linux/autonomous_mpc_unified"
 
 echo "[SYSTEM] Chạy C++ Autonomous Runtime: $TARGET_BIN"
 "$TARGET_BIN" --host "$DEFAULT_HOST" --with-obstacles "$@"

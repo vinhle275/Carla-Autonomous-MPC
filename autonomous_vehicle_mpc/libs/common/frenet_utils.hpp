@@ -1,6 +1,6 @@
 // ==============================================================================
 // FRENET UTILITIES & TRAJECTORY MATH ROUTINES
-// Modern C++20 | Header-only fast vector math
+// Modern C++20 | Header-only fast vector math & 9-point OBB Frenet Projection
 // ==============================================================================
 
 #pragma once
@@ -10,7 +10,9 @@
 #endif
 #include <cmath>
 #include <vector>
+#include <array>
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 #ifndef M_PI
@@ -74,8 +76,8 @@ inline FrenetProjection project_to_frenet(double x, double y,
                                           const std::vector<double>& theta_traj,
                                           const std::vector<double>& s_traj,
                                           size_t hint_idx = 0,
-                                          size_t window_back = 150,
-                                          size_t window_fwd = 300) {
+                                          size_t window_back = 200,
+                                          size_t window_fwd = 450) {
     FrenetProjection res{};
     size_t n = x_traj.size();
     if (n == 0) return res;
@@ -122,6 +124,43 @@ inline FrenetProjection project_to_frenet(double x, double y,
     return res;
 }
 
+/// @brief Tính chính xác bao Frenet 2D [s_rear, s_front] x [d_min, d_max] bằng cách chiếu 9 điểm đặc trưng của OBB xoay theo box_yaw
+inline void compute_obb_frenet_bounds(double cx, double cy, double box_yaw,
+                                      double half_len, double half_wid,
+                                      const std::vector<double>& x_traj,
+                                      const std::vector<double>& y_traj,
+                                      const std::vector<double>& theta_traj,
+                                      const std::vector<double>& s_traj,
+                                      size_t hint_idx,
+                                      double& out_s_rear, double& out_s_front,
+                                      double& out_d_min, double& out_d_max) {
+    double cos_y = std::cos(box_yaw);
+    double sin_y = std::sin(box_yaw);
+    double hl = std::max(half_len, 0.3);
+    double hw = std::max(half_wid, 0.3);
+
+    const std::array<std::pair<double, double>, 9> offsets = {{
+        {0.0, 0.0},
+        {-hl, -hw}, {-hl, hw}, {hl, -hw}, {hl, hw},
+        {0.0, -hw}, {0.0, hw}, {-hl, 0.0}, {hl, 0.0}
+    }};
+
+    out_s_rear = std::numeric_limits<double>::max();
+    out_s_front = -std::numeric_limits<double>::max();
+    out_d_min = std::numeric_limits<double>::max();
+    out_d_max = -std::numeric_limits<double>::max();
+
+    for (const auto& [dx, dy] : offsets) {
+        double px = cx + dx * cos_y - dy * sin_y;
+        double py = cy + dx * sin_y + dy * cos_y;
+        auto proj = project_to_frenet(px, py, x_traj, y_traj, theta_traj, s_traj, hint_idx);
+        out_s_rear = std::min(out_s_rear, proj.s);
+        out_s_front = std::max(out_s_front, proj.s);
+        out_d_min = std::min(out_d_min, proj.d);
+        out_d_max = std::max(out_d_max, proj.d);
+    }
+}
+
 /// @brief Nội suy 1 chiều (tương đương np.interp)
 inline double interp1d(double x_query, const std::vector<double>& x_vals, const std::vector<double>& y_vals) {
     if (x_vals.empty() || y_vals.empty()) return 0.0;
@@ -139,6 +178,52 @@ inline double interp1d(double x_query, const std::vector<double>& x_vals, const 
 
     double t = (x1 > x0) ? ((x_query - x0) / (x1 - x0)) : 0.0;
     return y0 + t * (y1 - y0);
+}
+
+/// @brief Nội suy cung đường động N bước dự báo phía trước (Dynamic Arc-length Parameterized Interpolation)
+/// Đồng bộ chính xác 100% với get_ref_trajectory() trong help_functions.py
+inline void get_ref_trajectory(const std::vector<double>& x_traj,
+                               const std::vector<double>& y_traj,
+                               const std::vector<double>& theta_traj,
+                               const std::vector<double>& v_traj,
+                               const std::vector<double>& s_traj,
+                               size_t current_idx,
+                               double x0, double y0,
+                               int horizon, double sample_time,
+                               std::vector<double>& out_x_ref,
+                               std::vector<double>& out_y_ref,
+                               std::vector<double>& out_theta_ref,
+                               std::vector<double>& out_v_ref) {
+    out_x_ref.assign(horizon, 0.0);
+    out_y_ref.assign(horizon, 0.0);
+    out_theta_ref.assign(horizon, 0.0);
+    out_v_ref.assign(horizon, 0.0);
+    if (x_traj.empty() || s_traj.empty()) return;
+
+    size_t n_pts = x_traj.size();
+    current_idx = std::min(current_idx, n_pts - 1);
+    double s0 = s_traj[current_idx];
+
+    double xr = x_traj[current_idx];
+    double yr = y_traj[current_idx];
+    double thr = theta_traj[current_idx];
+    double tx = std::cos(thr), ty = std::sin(thr);
+    double ds_tangent = tx * (x0 - xr) + ty * (y0 - yr);
+    if (std::abs(ds_tangent) < 3.0) {
+        s0 = std::max(0.0, s0 + ds_tangent);
+    }
+
+    double curr_s = s0;
+    double s_limit = s_traj.back();
+    for (int k = 0; k < horizon; ++k) {
+        out_x_ref[k] = interp1d(curr_s, s_traj, x_traj);
+        out_y_ref[k] = interp1d(curr_s, s_traj, y_traj);
+        out_theta_ref[k] = interp1d(curr_s, s_traj, theta_traj);
+        out_v_ref[k] = interp1d(curr_s, s_traj, v_traj);
+
+        double vk = std::max(out_v_ref[k], 1.5);
+        curr_s = std::min(curr_s + vk * sample_time, s_limit);
+    }
 }
 
 } // namespace av::math

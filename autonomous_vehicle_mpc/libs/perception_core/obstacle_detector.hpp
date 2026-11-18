@@ -1,6 +1,6 @@
 // ==============================================================================
 // DUAL-ZONE PERCEPTION & PERSISTENT LOCAL OBJECT MAP (MOT)
-// Modern C++20 | OBB 2D, Velocity Estimation & Dead-Reckoning Memory
+// Modern C++20 | 9-Point OBB Frenet Projection, Velocity Estimation & Memory
 // ==============================================================================
 
 #pragma once
@@ -13,20 +13,7 @@
 
 namespace av::perception {
 
-#pragma pack(push, 1)
-struct RawActorData {
-    int32_t id{0};
-    double x{0.0};
-    double y{0.0};
-    double z{0.0};
-    double yaw_rad{0.0};
-    double extent_x{2.4};
-    double extent_y{1.0};
-    double vx{0.0};
-    double vy{0.0};
-    uint8_t is_vehicle{1};
-};
-#pragma pack(pop)
+using RawActorData = av::types::RawActorPacket;
 
 class ObstacleDetector {
 public:

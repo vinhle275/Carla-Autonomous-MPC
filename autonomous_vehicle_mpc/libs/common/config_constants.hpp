@@ -30,6 +30,7 @@ constexpr uint64_t WATCHDOG_TIMEOUT_MS = 100;      // Ngưỡng Watchdog Timeout
 constexpr double TARGET_SPEED_MS = 10.0;           // Vận tốc mục tiêu (m/s) ~ 36.0 km/h
 constexpr double CAUTION_SPEED_MS = 6.0;           // Vận tốc an toàn khi lách qua vật cản (m/s)
 constexpr double MAX_ACCELERATION_MS2 = 10.0;      // Gia tốc tiến tối đa (m/s^2)
+constexpr double THROTTLE_ACCEL_SCALE_MS2 = 6.2;   // Hệ số quy đổi gia tốc -> bướm ga trên CARLA (m/s^2)
 constexpr double MAX_BRAKING_MS2 = -4.1;           // Gia tốc hãm phanh tối đa (m/s^2)
 constexpr double MAX_WHEEL_ANGLE_RAD = 70.0 * M_PI / 180.0; // Góc lái tối đa bánh xe (~1.2217 rad)
 constexpr double WHEELBASE_L = 2.875;              // Chiều dài cơ sở L (m)
@@ -80,7 +81,7 @@ constexpr double STANDARD_ROAD_MAX_M =  3.90;      // Vạch trắng liền mép
 // Trọng số QP-MPC
 constexpr double FINE_X_COEF = 2.0;
 constexpr double FINE_Y_COEF = 2.0;
-constexpr double FINE_V_COEF = 12.0;
+constexpr double FINE_V_COEF = 25.0;
 constexpr double FINE_THETA_COEF = 120.0;
 constexpr double FINE_LATERAL_COEF = 30.0;
 constexpr double FINE_STEER_COEF = 25.0;

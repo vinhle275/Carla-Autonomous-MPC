@@ -499,7 +499,8 @@ int main(int argc, char* argv[]) {
                 cost = res.cost;
 
                 bool rb_latch = mpc_ctrl.is_roadblock_stopped();
-                auto act = safety::ActuationMapper::map_controls(res.steer_rad, res.acceleration_m_s2, v0, rb_latch);
+                auto act = safety::ActuationMapper::map_controls(
+                    res.steer_rad, res.acceleration_m_s2, v0, rb_latch, mpc_ctrl.is_roadblock());
                 cmd_out.throttle = act.throttle;
                 cmd_out.brake = act.brake;
                 cmd_out.steer = act.steer;

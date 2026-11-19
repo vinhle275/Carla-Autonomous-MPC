@@ -320,8 +320,9 @@ def main():
                 solve_time_sec = time.perf_counter() - t_solve_start
 
                 # Chuyển đổi tín hiệu điều khiển góc lái và gia tốc cho Chế độ 1
+                is_rb_mode = bool(getattr(mpc_controller, 'is_roadblock', False))
                 throttle, brake, steer = CarlaSimulator.process_control_inputs(
-                    wheel_angle_rad, acceleration_m_s_2, current_speed=v0
+                    wheel_angle_rad, acceleration_m_s_2, current_speed=v0, is_roadblock_braking=is_rb_mode
                 )
 
             # BẢO VỆ TUYỆT ĐỐI KHÔNG CHẠM VẠCH VÀNG:

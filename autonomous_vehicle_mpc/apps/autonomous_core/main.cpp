@@ -216,7 +216,8 @@ int main(int argc, char* argv[]) {
 
             // Ánh xạ tín hiệu sang throttle, brake, steer (kèm chốt dừng tĩnh brake = 0.18)
             bool rb_latch = mpc_controller.is_roadblock_stopped();
-            auto act = safety::ActuationMapper::map_controls(mpc_res.steer_rad, mpc_res.acceleration_m_s2, v0, rb_latch);
+            auto act = safety::ActuationMapper::map_controls(
+                mpc_res.steer_rad, mpc_res.acceleration_m_s2, v0, rb_latch, mpc_controller.is_roadblock());
             cmd_out.throttle = act.throttle;
             cmd_out.brake = act.brake;
             cmd_out.steer = act.steer;

@@ -120,6 +120,10 @@ private:
                                  const std::vector<double>& theta_ref,
                                  const std::vector<double>& v_ref);
 
+    void shift_nominal_trajectory(const std::vector<std::array<double, 4>>& x_opt,
+                                  const std::vector<std::array<double, 2>>& u_opt,
+                                  double dt_loop);
+
     void get_legal_corridor_bounds(std::optional<size_t> idx,
                                    std::optional<double> s,
                                    const types::CorridorBoundsData& corridor_data,

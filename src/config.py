@@ -27,7 +27,6 @@ OVERRIDE_V_REF = True        # Tự động nâng tốc độ trong CSV lên TAR
 
 # Vehicle characteristics (from CARLA simulator)
 MAX_ACCELERATION_M_S_2 = 10.0
-THROTTLE_ACCEL_SCALE_M_S_2 = 6.2
 MAX_BRAKING_M_S_2 = -4.1
 MAX_WHEEL_ANGLE_RAD = 70.0 / 180.0 * np.pi
 L = 2.875  # Wheelbase length of vehicle in meters
@@ -43,7 +42,7 @@ MAX_CONTROL_BRAKING_M_S_2 = -4.1
 # Trọng số tối ưu MPC (Cân bằng biên độ - pha, triệt tiêu dao động hình sin và bám làn ổn định khi nhập làn)
 FINE_X_COEF = 2.0             # Phạt sai số X dọc (giảm về 2.0 để không kéo lệch tâm xe vào trong dây cung khúc cua)
 FINE_Y_COEF = 2.0             # Phạt sai số Y dọc
-FINE_V_COEF = 25.0            # Phạt sai số vận tốc V
+FINE_V_COEF = 12.0            # Phạt sai số vận tốc V
 FINE_THETA_COEF = 120.0       # Phạt sai số góc hướng Theta (tăng mạnh làm giảm chấn góc hướng D-term, triệt tiêu lắc đuôi/lắc vô lăng)
 FINE_LATERAL_COEF = 30.0      # Phạt độ lệch ngang vuông góc chuẩn Frenet (bám chắc tâm làn)
 FINE_STEER_COEF = 25.0        # Phạt biên độ góc lái (giảm để xe giữ góc lái tự nhiên khi vào cua mà không bị cản trở)

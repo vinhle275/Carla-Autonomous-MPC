@@ -14,9 +14,9 @@ REM Kiem tra neu thu muc build chua co hoac chua duoc cau hinh
 if not exist "build\build.ninja" if not exist "build\Makefile" if not exist "build\autonomous_vehicle_mpc.sln" (
     echo [CMAKE] Dang cau hinh he thong bien dich vao thu muc build/...
     if exist "D:\Appfile\Code\msys64\ucrt64\bin\g++.exe" (
-        cmake -B build -G "MinGW Makefiles" -DCMAKE_CXX_COMPILER="D:/Appfile/Code/msys64/ucrt64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="D:/Appfile/Code/msys64/ucrt64/bin/mingw32-make.exe" -DCMAKE_BUILD_TYPE=Release
+        cmake -B build -G "MinGW Makefiles" -DCMAKE_C_COMPILER="D:/Appfile/Code/msys64/ucrt64/bin/gcc.exe" -DCMAKE_CXX_COMPILER="D:/Appfile/Code/msys64/ucrt64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="D:/Appfile/Code/msys64/ucrt64/bin/mingw32-make.exe" -DCMAKE_BUILD_TYPE=Release
     ) else if exist "C:\msys64\ucrt64\bin\g++.exe" (
-        cmake -B build -G "MinGW Makefiles" -DCMAKE_CXX_COMPILER="C:/msys64/ucrt64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="C:/msys64/ucrt64/bin/mingw32-make.exe" -DCMAKE_BUILD_TYPE=Release
+        cmake -B build -G "MinGW Makefiles" -DCMAKE_C_COMPILER="C:/msys64/ucrt64/bin/gcc.exe" -DCMAKE_CXX_COMPILER="C:/msys64/ucrt64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="C:/msys64/ucrt64/bin/mingw32-make.exe" -DCMAKE_BUILD_TYPE=Release
     ) else (
         cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
     )

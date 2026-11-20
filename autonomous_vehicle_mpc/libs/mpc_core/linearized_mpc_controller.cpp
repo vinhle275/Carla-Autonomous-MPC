@@ -261,6 +261,29 @@ void LinearizedMpcController::init_nominal_trajectory(
     nom_initialized_ = true;
 }
 
+void LinearizedMpcController::shift_nominal_trajectory(
+    const std::vector<std::array<double, 4>>& x_opt,
+    const std::vector<std::array<double, 2>>& u_opt,
+    double dt_loop) {
+    if (static_cast<int>(x_opt.size()) < horizon_ + 1 || static_cast<int>(u_opt.size()) < horizon_) {
+        return;
+    }
+    double shift_frac = std::clamp(dt_loop / dt_, 0.20, 1.0);
+    for (int k = 0; k < horizon_; ++k) {
+        for (int i = 0; i < 4; ++i) {
+            x_nom_[k][i] = (1.0 - shift_frac) * x_opt[k][i] + shift_frac * x_opt[k + 1][i];
+        }
+        x_nom_[k][2] = x_opt[k][2] + shift_frac * math::normalize_angle(x_opt[k + 1][2] - x_opt[k][2]);
+    }
+    x_nom_[horizon_] = x_opt[horizon_];
+    for (int k = 0; k < horizon_ - 1; ++k) {
+        for (int i = 0; i < 2; ++i) {
+            u_nom_[k][i] = (1.0 - shift_frac) * u_opt[k][i] + shift_frac * u_opt[k + 1][i];
+        }
+    }
+    u_nom_[horizon_ - 1] = u_opt[horizon_ - 1];
+}
+
 std::pair<std::optional<double>, std::pair<double, double>> LinearizedMpcController::select_optimal_shift_from_gaps(
     const std::vector<std::pair<double, double>>& valid_gaps,
     std::optional<double> preferred_sign,
@@ -687,9 +710,12 @@ void LinearizedMpcController::compute_local_reference_shift(
     std::optional<CrossSlice> blocking_slice = std::nullopt;
 
     struct PrevSliceInfo {
+        double s_rear{0.0};
         double s_front{0.0};
         std::pair<double, double> gap{0.0, 0.0};
         double d_target{0.0};
+        bool has_moving{false};
+        bool is_ahead{false};
     };
     std::optional<PrevSliceInfo> prev_slice_info = std::nullopt;
 
@@ -697,7 +723,15 @@ void LinearizedMpcController::compute_local_reference_shift(
         double sl_road_min = road_min, sl_road_max = road_max;
         bool sl_yl = is_yellow_solid;
         get_legal_corridor_bounds(std::nullopt, sl.s_rear, corridor_data, sl_road_min, sl_road_max, sl_yl);
-        double sl_yellow_limit = sl_road_min;
+        double sl_yellow_limit = sl_yl ? sl_road_min : (-1.75 + config::R_CLEARANCE_EDGE);
+
+        bool sl_has_moving = false;
+        for (const auto& o : sl.obs_list) {
+            if (std::hypot(o.vx, o.vy) >= 0.5) {
+                sl_has_moving = true;
+                break;
+            }
+        }
 
         // QUY TẮC BẤT BIẾN (SKILL.md Mục 2.1):
         // Chỉ né khi affects_lane = true (vật cản cách tâm đường <= 1.35m,即 blocked interval đè lên [-0.05, +0.05])
@@ -808,8 +842,10 @@ void LinearizedMpcController::compute_local_reference_shift(
             if (config::ENABLE_ROADBLOCK_EMERGENCY_STOP && is_ahead_of_ego) {
                 is_roadblock_ = true;
                 roadblock_barrier_dist_ = std::max(0.0, sl.s_rear - config::EGO_FRONT_OVERHANG_M - s_ego);
-                for (const auto& o : sl.obs_list) {
-                    roadblock_latched_ids_.insert(o.id);
+                if (!sl_has_moving) {
+                    for (const auto& o : sl.obs_list) {
+                        roadblock_latched_ids_.insert(o.id);
+                    }
                 }
                 if (sl_yl) {
                     roadblock_reason_ = "VẠCH VÀNG NÉT LIỀN BÊN TRÁI CẤM VƯỢT + LÀN PHẢI BỊ CHẶN; dừng xe an toàn!";
@@ -840,8 +876,10 @@ void LinearizedMpcController::compute_local_reference_shift(
             if (config::ENABLE_ROADBLOCK_EMERGENCY_STOP && is_ahead_of_ego) {
                 is_roadblock_ = true;
                 roadblock_barrier_dist_ = std::max(0.0, sl.s_rear - config::EGO_FRONT_OVERHANG_M - s_ego);
-                for (const auto& o : sl.obs_list) {
-                    roadblock_latched_ids_.insert(o.id);
+                if (!sl_has_moving) {
+                    for (const auto& o : sl.obs_list) {
+                        roadblock_latched_ids_.insert(o.id);
+                    }
                 }
                 if (sl_yl) {
                     roadblock_reason_ = "VẠCH VÀNG NÉT LIỀN BÊN TRÁI CẤM VƯỢT + LỀ PHẢI BỊ CHẶN; dừng xe an toàn!";
@@ -874,16 +912,21 @@ void LinearizedMpcController::compute_local_reference_shift(
                                   config::S_CURVE_APPROACH_MARGIN_M + std::max(7.5, 4.0 * dd_between);
 
             if ((!has_common_corridor || dd_between > 0.85) && ds_gap < ds_min_weave) {
-                if (config::ENABLE_ROADBLOCK_EMERGENCY_STOP && is_ahead_of_ego) {
+                bool staggered_has_moving = sl_has_moving || prev_slice_info->has_moving;
+                bool staggered_ahead = is_ahead_of_ego || (prev_slice_info->is_ahead && !is_moving_away_far);
+                if (config::ENABLE_ROADBLOCK_EMERGENCY_STOP && staggered_ahead) {
                     is_roadblock_ = true;
-                    roadblock_barrier_dist_ = std::max(0.0, sl.s_rear - config::EGO_FRONT_OVERHANG_M - s_ego);
+                    double barrier_s = is_ahead_of_ego ? sl.s_rear : prev_slice_info->s_rear;
+                    roadblock_barrier_dist_ = std::max(0.0, barrier_s - config::EGO_FRONT_OVERHANG_M - s_ego);
                     std::ostringstream oss;
                     oss << std::fixed << std::setprecision(1)
-                        << "PHONG TỎA ĐƯỜNG SO LE (STAGGERED ROADBLOCK) tại s=" << sl.s_rear
+                        << "PHONG TỎA ĐƯỜNG SO LE (STAGGERED ROADBLOCK) tại s=" << barrier_s
                         << "m (ds=" << ds_gap << "m < " << ds_min_weave << "m); dừng xe an toàn!";
                     roadblock_reason_ = oss.str();
                     for (const auto& o : sl.obs_list) {
-                        roadblock_latched_ids_.insert(o.id);
+                        if (!staggered_has_moving) {
+                            roadblock_latched_ids_.insert(o.id);
+                        }
                         active_chain_.erase(o.id);
                     }
                     blocking_slice = sl;
@@ -906,7 +949,9 @@ void LinearizedMpcController::compute_local_reference_shift(
                 roadblock_barrier_dist_ = std::max(0.0, dist_to_sl);
                 roadblock_reason_ = "KHOẢNG CÁCH DỌC QUÁ NGẮN ĐỂ ĐẢO LÀN AN TOÀN; dừng xe an toàn!";
                 for (const auto& o : sl.obs_list) {
-                    roadblock_latched_ids_.insert(o.id);
+                    if (!sl_has_moving) {
+                        roadblock_latched_ids_.insert(o.id);
+                    }
                     active_chain_.erase(o.id);
                 }
                 blocking_slice = sl;
@@ -920,7 +965,7 @@ void LinearizedMpcController::compute_local_reference_shift(
         sl.has_min_s_app_start = has_min_s_app;
         sl.min_s_app_start = min_s_app_start;
 
-        prev_slice_info = PrevSliceInfo{sl.s_front, best_gap, actual_d_target};
+        prev_slice_info = PrevSliceInfo{sl.s_rear, sl.s_front, best_gap, actual_d_target, sl_has_moving, is_ahead_of_ego};
         if (std::abs(sl.d_target) > 0.05) {
             curr_sign = (sl.d_target < 0.0) ? -1.0 : 1.0;
             curr_d_target = sl.d_target;
@@ -1316,10 +1361,27 @@ bool LinearizedMpcController::solve_qp_iteration(
         if (horizon_is_yellow_solid[k]) any_yellow_solid = true;
     }
 
-    // 3. Khởi tạo ma trận Hessian đầy đủ P (2N x 2N) và vector gradient q (2N)
-    // Quy ước: J(U) = sum w * (g^T U + r)^2 -> P += 2 * w * g * g^T, q += 2 * w * r * g
-    std::vector<std::vector<double>> P(n_u, std::vector<double>(n_u, 0.0));
-    std::vector<double> q(n_u, 0.0);
+    // 3. Khởi tạo bài toán QP chuẩn OSQP với biến bù Slack tường minh (eps >= 0), đồng bộ 100% CasADi Python:
+    // Biến tối ưu z (kích thước n_vars = 8*N):
+    //   - [0 .. 2N-1]   : U_k = [delta_k, a_k] (2N biến điều khiển)
+    //   - [2N .. 3N-1]  : eps_road_left[k] >= 0 (N biến bù biên trái / vạch vàng)
+    //   - [3N .. 4N-1]  : eps_road_right[k] >= 0 (N biến bù biên phải)
+    //   - [4N .. 8N-1]  : eps_obs[m, k] >= 0 (4*N biến bù siêu phẳng cho tối đa 4 vật cản gần nhất)
+    constexpr int max_obs = 4;
+    const int n_vars = n_u + (2 + max_obs) * horizon_;
+    const int n_cons = (11 + max_obs) * horizon_;
+    constexpr double kInf = 1.0e20;
+
+    auto idx_eps_left  = [&](int k) { return n_u + k; };
+    auto idx_eps_right = [&](int k) { return n_u + horizon_ + k; };
+    auto idx_eps_obs   = [&](int m, int k) { return n_u + (2 + m) * horizon_ + k; };
+
+    // Quy ước OSQP: min 0.5 * z^T P z + q^T z -> hạng tử w * (g^T U + r)^2 đóng góp P += 2*w*g*g^T, q += 2*w*r*g
+    std::vector<std::vector<double>> P(n_vars, std::vector<double>(n_vars, 0.0));
+    std::vector<double> q(n_vars, 0.0);
+    std::vector<std::vector<double>> A_cons(n_cons, std::vector<double>(n_vars, 0.0));
+    std::vector<double> l_cons(n_cons, -kInf);
+    std::vector<double> u_cons(n_cons,  kInf);
 
     auto add_quadratic_term = [&](double weight, const std::vector<double>& g, double r, double lin_slope = 0.0) {
         if (weight <= 0.0 && lin_slope == 0.0) return;
@@ -1339,7 +1401,7 @@ bool LinearizedMpcController::solve_qp_iteration(
     double xy_coef_y = is_roadblock ? (0.10 * config::FINE_Y_COEF) : config::FINE_Y_COEF;
     double q_v = is_roadblock ? 120.0 : config::FINE_V_COEF;
 
-    // 4. Đóng góp chi phí bám quỹ đạo, góc hướng, vận tốc, sai lệch ngang và độ mượt điều khiển
+    // 4. Đóng góp chi phí bám quỹ đạo, góc hướng, vận tốc, sai lệch ngang, độ mượt & biến bù hành lang
     // Đồng bộ 100% với src/linearized_mpc_controller.py (dòng 1330-1380): X[:, k] ứng với x_ref[k] tại t = k * dt
     for (int k = 0; k < horizon_; ++k) {
         int st_idx = k;
@@ -1398,32 +1460,72 @@ bool LinearizedMpcController::solve_qp_iteration(
             P[prev_a][idx_a]  -= w_ad;
         }
 
-        // (e) Ràng buộc mềm Hành lang Pháp lý Động [horizon_road_min[k], horizon_road_max[k]]
+        // (e) Ràng buộc mềm Hành lang Pháp lý Động với biến bù eps_road_left[k] >= 0, eps_road_right[k] >= 0
+        int i_el = idx_eps_left(k);
+        int i_er = idx_eps_right(k);
+
+        double w_left_q = horizon_is_yellow_solid[k] ? config::MPC_W_YELLOW_QUAD : config::MPC_W_ROAD_RIGHT;
+        double w_left_l = horizon_is_yellow_solid[k] ? config::MPC_W_YELLOW_LINEAR : config::MPC_W_ROAD_RIGHT_LINEAR;
+        P[i_el][i_el] = 2.0 * w_left_q;
+        q[i_el]       = w_left_l;
+
+        P[i_er][i_er] = 2.0 * config::MPC_W_ROAD_RIGHT;
+        q[i_er]       = config::MPC_W_ROAD_RIGHT_LINEAR;
+
+        // Ràng buộc không âm cho eps_road_left[k] >= 0 và eps_road_right[k] >= 0
+        int row_el_box = 3 * horizon_ + k;
+        A_cons[row_el_box][i_el] = 1.0;
+        l_cons[row_el_box] = 0.0;
+        u_cons[row_el_box] = kInf;
+
+        int row_er_box = 4 * horizon_ + k;
+        A_cons[row_er_box][i_er] = 1.0;
+        l_cons[row_er_box] = 0.0;
+        u_cons[row_er_box] = kInf;
+
+        // d_lat_k = g_dlat^T * U + r_dlat
         double nx_orig = -std::sin(theta_ref_orig[k]);
         double ny_orig =  std::cos(theta_ref_orig[k]);
-        std::vector<double> g_dlat(n_u, 0.0);
-        for (int col = 0; col < n_u; ++col) {
-            g_dlat[col] = S_k[0][col] * nx_orig + S_k[1][col] * ny_orig;
-        }
         double r_dlat = (c_k[0] - x_ref_orig[k]) * nx_orig + (c_k[1] - y_ref_orig[k]) * ny_orig;
 
-        // Dự đoán độ lệch ngang theo nghiệm danh định x_nom_ hiện tại để kích hoạt Slack Penalty khi vi phạm biên
-        double d_nom_k = (x_nom_[st_idx][0] - x_ref_orig[k]) * nx_orig + (x_nom_[st_idx][1] - y_ref_orig[k]) * ny_orig;
-
-        // Vi phạm biên phải: d_lat_k > horizon_road_max[k]
-        if (d_nom_k > horizon_road_max[k]) {
-            add_quadratic_term(config::MPC_W_ROAD_RIGHT, g_dlat, r_dlat - horizon_road_max[k], 0.0);
+        int row_road_r = 9 * horizon_ + k;
+        int row_road_l = 10 * horizon_ + k;
+        for (int col = 0; col < n_u; ++col) {
+            double g_col = S_k[0][col] * nx_orig + S_k[1][col] * ny_orig;
+            A_cons[row_road_r][col] = g_col;
+            A_cons[row_road_l][col] = g_col;
         }
-        // Vi phạm biên trái (Vạch vàng SOLID phạt cực nặng 25000.0): d_lat_k < horizon_road_min[k]
-        if (d_nom_k < horizon_road_min[k]) {
-            double w_left_q = horizon_is_yellow_solid[k] ? config::MPC_W_YELLOW_QUAD : config::MPC_W_ROAD_RIGHT;
-            std::vector<double> neg_g_dlat(n_u, 0.0);
-            for (int col = 0; col < n_u; ++col) neg_g_dlat[col] = -g_dlat[col];
-            add_quadratic_term(w_left_q, neg_g_dlat, horizon_road_min[k] - r_dlat, 0.0);
+        // d_lat_k - eps_road_right[k] <= horizon_road_max[k]
+        A_cons[row_road_r][i_er] = -1.0;
+        l_cons[row_road_r] = -kInf;
+        u_cons[row_road_r] = horizon_road_max[k] - r_dlat;
+
+        // d_lat_k + eps_road_left[k] >= horizon_road_min[k]
+        A_cons[row_road_l][i_el] = 1.0;
+        l_cons[row_road_l] = horizon_road_min[k] - r_dlat;
+        u_cons[row_road_l] = kInf;
+    }
+
+    // Khởi tạo mặc định cho 4*N biến bù siêu phẳng vật cản eps_obs[m, k]
+    for (int m = 0; m < max_obs; ++m) {
+        for (int k = 0; k < horizon_; ++k) {
+            int i_eo = idx_eps_obs(m, k);
+            P[i_eo][i_eo] = 2.0 * config::MPC_W_SLACK;
+            q[i_eo]       = config::MPC_W_SLACK_LINEAR;
+
+            int row_eo_box = (5 + m) * horizon_ + k;
+            A_cons[row_eo_box][i_eo] = 1.0;
+            l_cons[row_eo_box] = 0.0;
+            u_cons[row_eo_box] = 0.0; // Khóa bằng 0 khi không kích hoạt
+
+            int row_obs_ineq = (11 + m) * horizon_ + k;
+            A_cons[row_obs_ineq][i_eo] = 1.0;
+            l_cons[row_obs_ineq] = -kInf;
+            u_cons[row_obs_ineq] =  kInf;
         }
     }
 
-    // 5. Ràng buộc Siêu phẳng phân tách vật cản (Separating Hyperplane - SKILL.md Mục 5.1)
+    // 5. Ràng buộc Siêu phẳng phân tách vật cản với biến bù eps_obs[m, k] >= 0 (SKILL.md Mục 5.1)
     if (!is_roadblock && !obstacles.empty()) {
         double tx_ego = std::cos(x_init[2]);
         double ty_ego = std::sin(x_init[2]);
@@ -1439,11 +1541,12 @@ bool LinearizedMpcController::solve_qp_iteration(
             return std::hypot(a.center_x - x_init[0], a.center_y - x_init[1]) <
                    std::hypot(b.center_x - x_init[0], b.center_y - x_init[1]);
         });
-        if (ahead_obs.size() > 4) ahead_obs.resize(4);
+        if (static_cast<int>(ahead_obs.size()) > max_obs) ahead_obs.resize(max_obs);
 
         double r_safe = config::R_CLEARANCE_EDGE; // 1.35m
 
-        for (const auto& obs : ahead_obs) {
+        for (size_t m = 0; m < ahead_obs.size(); ++m) {
+            const auto& obs = ahead_obs[m];
             double s_zone_start = obs.s_rear - config::EGO_FRONT_OVERHANG_M - 0.5;
             double s_zone_end   = obs.s_front + config::EGO_REAR_OVERHANG_M + 0.5;
             double obs_d_center = 0.5 * (obs.d_min + obs.d_max);
@@ -1475,39 +1578,35 @@ bool LinearizedMpcController::solve_qp_iteration(
                     pass_sign = 1.0;
                 }
 
-                std::vector<double> g_dlat(n_u, 0.0);
-                for (int col = 0; col < n_u; ++col) {
-                    g_dlat[col] = S_mat[st_idx][0][col] * nx_k + S_mat[st_idx][1][col] * ny_k;
-                }
+                int i_eo = idx_eps_obs(static_cast<int>(m), k);
+                int row_eo_box = (5 + static_cast<int>(m)) * horizon_ + k;
+                u_cons[row_eo_box] = kInf; // Mở khóa biến bù eps_obs[m, k] >= 0
+
+                int row_obs_ineq = (11 + static_cast<int>(m)) * horizon_ + k;
                 double r_dlat = (c_vec[st_idx][0] - x_ref_orig[k]) * nx_k + (c_vec[st_idx][1] - y_ref_orig[k]) * ny_k;
-                double d_nom_k = (x_nom_[st_idx][0] - x_ref_orig[k]) * nx_k + (x_nom_[st_idx][1] - y_ref_orig[k]) * ny_k;
 
                 if (pass_sign > 0.0) {
-                    // Né bên PHẢI vật cản: d_lat_k >= obs.d_max + r_safe
-                    double bound_right = obs.d_max + r_safe;
-                    if (d_nom_k < bound_right) {
-                        std::vector<double> neg_g(n_u, 0.0);
-                        for (int col = 0; col < n_u; ++col) neg_g[col] = -g_dlat[col];
-                        add_quadratic_term(config::MPC_W_SLACK, neg_g, bound_right - r_dlat, 0.0);
+                    // Né bên PHẢI vật cản: d_lat_k + eps_obs[m, k] >= obs.d_max + r_safe
+                    for (int col = 0; col < n_u; ++col) {
+                        A_cons[row_obs_ineq][col] = S_mat[st_idx][0][col] * nx_k + S_mat[st_idx][1][col] * ny_k;
                     }
+                    A_cons[row_obs_ineq][i_eo] = 1.0;
+                    l_cons[row_obs_ineq] = (obs.d_max + r_safe) - r_dlat;
+                    u_cons[row_obs_ineq] = kInf;
                 } else {
-                    // Né bên TRÁI vật cản: d_lat_k <= obs.d_min - r_safe
-                    double bound_left = obs.d_min - r_safe;
-                    if (d_nom_k > bound_left) {
-                        add_quadratic_term(config::MPC_W_SLACK, g_dlat, r_dlat - bound_left, 0.0);
+                    // Né bên TRÁI vật cản: -d_lat_k + eps_obs[m, k] >= -obs.d_min + r_safe
+                    for (int col = 0; col < n_u; ++col) {
+                        A_cons[row_obs_ineq][col] = -(S_mat[st_idx][0][col] * nx_k + S_mat[st_idx][1][col] * ny_k);
                     }
+                    A_cons[row_obs_ineq][i_eo] = 1.0;
+                    l_cons[row_obs_ineq] = r_dlat - (obs.d_min - r_safe);
+                    u_cons[row_obs_ineq] = kInf;
                 }
             }
         }
     }
 
-    // 6. Thiết lập ràng buộc biên điều khiển vật lý & vận tốc: l_cons <= A_cons * U <= u_cons
-    // Gồm 2*N ràng buộc hộp điều khiển (delta_k, a_k) + N ràng buộc vận tốc V_{k+1}
-    int n_cons = 3 * horizon_;
-    std::vector<std::vector<double>> A_cons(n_cons, std::vector<double>(n_u, 0.0));
-    std::vector<double> l_cons(n_cons, 0.0);
-    std::vector<double> u_cons(n_cons, 0.0);
-
+    // 6. Thiết lập ràng buộc biên điều khiển vật lý & vận tốc: l_cons <= A_cons * z <= u_cons
     double min_v = is_roadblock ? 0.0 : std::min(x_init[3], 1.5);
 
     for (int k = 0; k < horizon_; ++k) {
@@ -1526,23 +1625,25 @@ bool LinearizedMpcController::solve_qp_iteration(
 
         // Ràng buộc vận tốc: min_v <= c_{k+1}[3] + S_{k+1}[3] * U <= 15.0
         int row_v = 2 * horizon_ + k;
-        A_cons[row_v] = S_mat[k + 1][3];
+        for (int col = 0; col < n_u; ++col) {
+            A_cons[row_v][col] = S_mat[k + 1][3][col];
+        }
         l_cons[row_v] = min_v - c_vec[k + 1][3];
         u_cons[row_v] = 15.0  - c_vec[k + 1][3];
     }
 
-    qp_solver_.setup(n_u, n_cons);
-    std::vector<double> u_flat;
+    qp_solver_.setup(n_vars, n_cons);
+    std::vector<double> z_flat;
     double qp_obj = 0.0;
-    if (!qp_solver_.solve_dense(P, q, A_cons, l_cons, u_cons, u_flat, &qp_obj) ||
-        static_cast<int>(u_flat.size()) < n_u) {
+    if (!qp_solver_.solve_dense(P, q, A_cons, l_cons, u_cons, z_flat, &qp_obj) ||
+        static_cast<int>(z_flat.size()) < n_u) {
         return false;
     }
 
     out_u_opt.resize(horizon_);
     for (int k = 0; k < horizon_; ++k) {
-        out_u_opt[k][0] = std::clamp(u_flat[2 * k], -config::MAX_WHEEL_ANGLE_RAD, config::MAX_WHEEL_ANGLE_RAD);
-        out_u_opt[k][1] = std::clamp(u_flat[2 * k + 1], config::MAX_BRAKING_MS2, config::MAX_ACCELERATION_MS2);
+        out_u_opt[k][0] = std::clamp(z_flat[2 * k], -config::MAX_WHEEL_ANGLE_RAD, config::MAX_WHEEL_ANGLE_RAD);
+        out_u_opt[k][1] = std::clamp(z_flat[2 * k + 1], config::MAX_BRAKING_MS2, config::MAX_ACCELERATION_MS2);
     }
 
     // Khôi phục chuỗi trạng thái tối ưu X_opt từ phương trình tuyến tính hóa
@@ -1552,7 +1653,7 @@ bool LinearizedMpcController::solve_qp_iteration(
         for (int i = 0; i < 4; ++i) {
             double val = c_vec[k + 1][i];
             for (int col = 0; col < n_u; ++col) {
-                val += S_mat[k + 1][i][col] * u_flat[col];
+                val += S_mat[k + 1][i][col] * z_flat[col];
             }
             out_x_opt[k + 1][i] = val;
         }
@@ -1675,10 +1776,7 @@ MpcOutput LinearizedMpcController::solve(
                                             prev_acc + config::MAX_ACCEL_DELTA_PER_100MS);
             u_opt[0][1] = acc_m_s2;
             u_prev_ = {steer_rad, acc_m_s2};
-            for (int k = 0; k < horizon_; ++k) x_nom_[k] = x_opt[k + 1];
-            x_nom_[horizon_] = x_opt[horizon_];
-            for (int k = 0; k < horizon_ - 1; ++k) u_nom_[k] = u_opt[k + 1];
-            u_nom_[horizon_ - 1] = u_opt[horizon_ - 1];
+            shift_nominal_trajectory(x_opt, u_opt, dt_loop);
 
             out.steer_rad = steer_rad;
             out.acceleration_m_s2 = acc_m_s2;
@@ -1721,11 +1819,11 @@ MpcOutput LinearizedMpcController::solve(
         double acc_m_s2 = u_opt[0][1];
 
         // Van một chiều bảo vệ vạch vàng trong dự báo MPC (Yellow Line One-Way Safety Valve)
+        bool is_crossing_yellow = false;
         if (is_yellow_solid && has_active_obs_ && !x_traj_.empty()) {
             auto proj_now = math::project_to_frenet(x_init[0], x_init[1], x_traj_, y_traj_, theta_traj_, s_traj_, current_traj_idx_);
             double obs_s_front = (active_obs_.group_s_front > active_obs_.s_front) ? active_obs_.group_s_front : active_obs_.s_front;
             if (obs_s_front >= proj_now.s && active_obs_.side_sign <= 0.0) {
-                bool is_crossing_yellow = false;
                 auto p0 = math::project_to_frenet(x_nom_[0][0], x_nom_[0][1], x_traj_, y_traj_, theta_traj_, s_traj_, current_traj_idx_);
                 for (int k = 4; k <= horizon_; ++k) {
                     auto pk = math::project_to_frenet(x_nom_[k][0], x_nom_[k][1], x_traj_, y_traj_, theta_traj_, s_traj_, current_traj_idx_);
@@ -1747,9 +1845,12 @@ MpcOutput LinearizedMpcController::solve(
         }
 
         // Bộ giới hạn tốc độ biến thiên gia tốc (Anti-Jerk Slew Rate Limiter: |da/dt| <= 2.0 m/s^3)
+        // Bỏ qua khi Van bảo vệ vạch vàng kích hoạt để ưu tiên phanh dừng an toàn tức thời
         // Đồng bộ nghiệm u_opt[0][1] để Warm-start hoàn toàn nhất quán với u_prev_
-        double max_da = 0.20 * std::clamp(dt_loop / 0.10, 0.20, 1.20);
-        acc_m_s2 = std::clamp(acc_m_s2, u_prev_[1] - max_da, u_prev_[1] + max_da);
+        if (!is_crossing_yellow) {
+            double max_da = 0.20 * std::clamp(dt_loop / 0.10, 0.20, 1.20);
+            acc_m_s2 = std::clamp(acc_m_s2, u_prev_[1] - max_da, u_prev_[1] + max_da);
+        }
         u_opt[0][1] = acc_m_s2;
         u_prev_ = {steer_rad, acc_m_s2};
 
@@ -1762,20 +1863,7 @@ MpcOutput LinearizedMpcController::solve(
         buffer_idx_ = 0;
 
         // Dịch chuyển nghiệm Warm-start cho chu kỳ tiếp theo (tương ứng tỷ lệ dt_loop / dt_)
-        double shift_frac = std::clamp(dt_loop / dt_, 0.20, 1.0);
-        for (int k = 0; k < horizon_; ++k) {
-            for (int i = 0; i < 4; ++i) {
-                x_nom_[k][i] = (1.0 - shift_frac) * x_opt[k][i] + shift_frac * x_opt[k + 1][i];
-            }
-            x_nom_[k][2] = x_opt[k][2] + shift_frac * math::normalize_angle(x_opt[k + 1][2] - x_opt[k][2]);
-        }
-        x_nom_[horizon_] = x_opt[horizon_];
-        for (int k = 0; k < horizon_ - 1; ++k) {
-            for (int i = 0; i < 2; ++i) {
-                u_nom_[k][i] = (1.0 - shift_frac) * u_opt[k][i] + shift_frac * u_opt[k + 1][i];
-            }
-        }
-        u_nom_[horizon_ - 1] = u_opt[horizon_ - 1];
+        shift_nominal_trajectory(x_opt, u_opt, dt_loop);
 
         out.steer_rad = steer_rad;
         out.acceleration_m_s2 = acc_m_s2;

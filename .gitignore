@@ -52,3 +52,7 @@ Thumbs.db
 *.png
 .plan/
 graphify-out/
+
+# Edge case test suite & scenarios (local testing only)
+data/test_scenarios/
+autonomous_vehicle_mpc/tests/

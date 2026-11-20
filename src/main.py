@@ -320,9 +320,8 @@ def main():
                 solve_time_sec = time.perf_counter() - t_solve_start
 
                 # Chuyển đổi tín hiệu điều khiển góc lái và gia tốc cho Chế độ 1
-                is_rb_mode = bool(getattr(mpc_controller, 'is_roadblock', False))
                 throttle, brake, steer = CarlaSimulator.process_control_inputs(
-                    wheel_angle_rad, acceleration_m_s_2, current_speed=v0, is_roadblock_braking=is_rb_mode
+                    wheel_angle_rad, acceleration_m_s_2, current_speed=v0
                 )
 
             # BẢO VỆ TUYỆT ĐỐI KHÔNG CHẠM VẠCH VÀNG:
@@ -330,7 +329,8 @@ def main():
             # - Nếu bị roadblock: Phanh dừng khẩn cấp.
             # - Chỉ mớm lái nhẹ sang phải nếu xe đang di chuyển lệch tiếp sang trái (v_lat_ego < -0.02)
             #   để tránh tạo dao động chattering (lắc lái trái/phải liên tục khi bám đường).
-            if (yellow_result is not None
+            if (not is_emergency
+                    and yellow_result is not None
                     and yellow_result.line_type == LineType.SOLID
                     and yellow_result.d_yellow_line_m is not None
                     and yellow_result.d_yellow_line_m <= 1.05):

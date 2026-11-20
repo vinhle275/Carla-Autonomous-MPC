@@ -24,12 +24,12 @@ public:
     static ActuatorOutput map_controls(double wheel_angle_rad,
                                       double acceleration_m_s2,
                                       double current_speed_m_s,
-                                      bool is_roadblock_latch = false,
-                                      bool is_roadblock_braking = false) {
+                                      bool is_roadblock_latch = false) {
         ActuatorOutput out;
 
-        // 0. Chốt dừng tĩnh Roadblock (Limousine Static Hold): khóa thẳng lái, giữ phanh tĩnh 0.18
-        if (is_roadblock_latch || (current_speed_m_s < 0.20 && acceleration_m_s2 <= -1.0 && std::abs(wheel_angle_rad) < 0.02)) {
+        // 0. Chốt dừng tĩnh Roadblock (Limousine Static Hold): chỉ giữ phanh tĩnh 0.18 khi xe đã thực sự chậm/dừng
+        if ((is_roadblock_latch && current_speed_m_s < 0.25) ||
+            (current_speed_m_s < 0.20 && acceleration_m_s2 <= -1.0 && std::abs(wheel_angle_rad) < 0.02)) {
             out.throttle = 0.0;
             out.brake = 0.18;
             out.steer = 0.0;
@@ -41,19 +41,8 @@ public:
             acceleration_m_s2 = std::min(acceleration_m_s2, 2.5);
         }
 
-        // Bù lực cản lăn + cản gió CARLA liên tục khi xe đang chạy (không áp dụng khi dừng Roadblock)
-        double a_eff = acceleration_m_s2;
-        if (!is_roadblock_braking && current_speed_m_s > 0.3 && acceleration_m_s2 > -0.35) {
-            double a_drag_ff = 0.72 + 0.12 * current_speed_m_s;
-            double ff_weight = std::clamp((acceleration_m_s2 + 0.35) / 0.35, 0.0, 1.0);
-            a_eff = acceleration_m_s2 + ff_weight * a_drag_ff;
-        }
-        if (is_roadblock_braking) {
-            a_eff = std::min(0.0, acceleration_m_s2);
-        }
-
         // 2. Phân nhánh Ga / Phanh
-        if (a_eff <= 0.0) {
+        if (acceleration_m_s2 <= 0.0) {
             out.throttle = 0.0;
             bool is_turning = std::abs(wheel_angle_rad) > 0.08;
 
@@ -67,16 +56,12 @@ public:
             } else if (current_speed_m_s < 2.5 && acceleration_m_s2 >= -1.2) {
                 // Đệm phanh êm tốc độ thấp (Limousine Stop Feathering chuẩn carla_simulator.py): giới hạn <= 0.18
                 out.brake = std::min(std::abs(acceleration_m_s2 / config::MAX_BRAKING_MS2), 0.18);
-            } else if (!is_roadblock_braking) {
-                // Giảm tốc điều tốc thông thường (tránh phanh thủy lực CARLA khóa bánh dừng đột ngột khi xuống 6 m/s)
-                double b = std::max(0.0, std::abs(acceleration_m_s2) - 0.25) / (std::abs(config::MAX_BRAKING_MS2) * 1.35);
-                out.brake = std::min(b, 0.25);
             } else {
-                // Khi dừng Roadblock: Áp dụng đầy đủ lực phanh tỉ lệ
+                // Khi chạy thẳng hoặc dừng Roadblock: Áp dụng đầy đủ lực phanh tỉ lệ
                 out.brake = std::min(std::abs(acceleration_m_s2 / config::MAX_BRAKING_MS2), 1.0);
             }
         } else {
-            out.throttle = std::clamp(a_eff / config::THROTTLE_ACCEL_SCALE_MS2, 0.0, 1.0);
+            out.throttle = std::min(acceleration_m_s2 / config::MAX_ACCELERATION_MS2, 1.0);
             out.brake = 0.0;
         }
 

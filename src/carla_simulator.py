@@ -281,22 +281,22 @@ class CarlaSimulator:
             self.ego_vehicle.apply_control(carla.VehicleControl(throttle=throttle, steer=steer, brake=brake))
 
     @staticmethod
-    def process_control_inputs(wheel_angle_rad, acceleration_m_s_2, current_speed=0.0, is_roadblock_braking=False):
+    def process_control_inputs(wheel_angle_rad, acceleration_m_s_2, current_speed=0.0):
         # Chống trượt bánh (Traction Control) khi vừa khởi động từ tốc độ 0
         if current_speed < 0.8:
             acceleration_m_s_2 = min(acceleration_m_s_2, 2.5)  # Khởi động mềm gia tốc max 2.5 m/s^2
 
-        # Bù lực cản lăn + cản gió CARLA liên tục khi xe đang chạy (không áp dụng khi dừng Roadblock)
-        a_eff = acceleration_m_s_2
-        if (not is_roadblock_braking) and current_speed > 0.3 and acceleration_m_s_2 > -0.35:
-            a_drag_ff = 0.72 + 0.12 * current_speed
-            ff_weight = float(np.clip((acceleration_m_s_2 + 0.35) / 0.35, 0.0, 1.0))
-            a_eff = acceleration_m_s_2 + ff_weight * a_drag_ff
-        if is_roadblock_braking:
-            a_eff = min(0.0, acceleration_m_s_2)
-
-        if a_eff <= 0:
+        if acceleration_m_s_2 <= 0:
             throttle = 0.0
+            # Trong vật lý CARLA, khi nhả ga (throttle=0) lúc đang đánh lái vào cua, lực cản lăn + ma sát trượt ngang
+            # của lốp đã tự hãm xe ~ -1.5..-2.0 m/s^2. Nếu nhồi thêm phanh thủy lực lớn sẽ gây bó bánh (acc ~ -20 m/s^2)
+            # làm xe khựng/dừng giữa khúc cua.
+            # Do đó:
+            # - Giảm tốc nhẹ (acc >= -0.35): Nhả ga tự nhiên (coasting, brake = 0.0).
+            # - Rà phanh điều tốc vừa phải (-1.8 <= acc < -0.35 khi xe đang chạy > 0.8 m/s): Đệm phanh êm tối đa 0.12.
+            # - Phanh gắt / Dừng khẩn cấp (acc < -1.8 hoặc giữ xe đứng yên khi v <= 0.8 m/s): Cho phép phanh dứt khoát tới 1.0.
+            # Chỉ đệm phanh êm (brake <= 0.12) khi xe đang đánh lái vào cua (|wheel_angle| > 0.08 rad)
+            # để tránh khóa bánh trước trong cua; khi đi thẳng hoặc phanh dừng Roadblock thì phanh chuẩn xác theo gia tốc.
             is_turning = abs(wheel_angle_rad) > 0.08
             if is_turning and current_speed > 0.8 and acceleration_m_s_2 >= -0.35:
                 brake = 0.0
@@ -304,12 +304,10 @@ class CarlaSimulator:
                 brake = min((abs(acceleration_m_s_2) - 0.35) / (abs(MAX_BRAKING_M_S_2) * 2.2), 0.12)
             elif current_speed < 2.5 and acceleration_m_s_2 >= -1.2:
                 brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 0.18)
-            elif not is_roadblock_braking:
-                brake = min(max(0.0, abs(acceleration_m_s_2) - 0.25) / (abs(MAX_BRAKING_M_S_2) * 1.35), 0.25)
             else:
                 brake = min(abs(acceleration_m_s_2 / MAX_BRAKING_M_S_2), 1.0)
         else:
-            throttle = float(np.clip(a_eff / 6.2, 0.0, 1.0))
+            throttle = min(acceleration_m_s_2 / MAX_ACCELERATION_M_S_2, 1.0)
             brake = 0.0
 
         steer = np.clip(wheel_angle_rad / MAX_WHEEL_ANGLE_RAD, -1.0, 1.0)

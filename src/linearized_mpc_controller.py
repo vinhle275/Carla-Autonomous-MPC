@@ -694,7 +694,11 @@ class LinearizedMpcController:
 
         for sl in slices:
             sl_road_min, sl_road_max, sl_yl = self.get_legal_corridor_bounds(s=sl['s_rear'])
-            sl_yellow_limit = sl_road_min
+            sl_yellow_limit = sl_road_min if sl_yl else (-1.75 + EGO_HALF_WIDTH_M + YELLOW_LINE_CLEARANCE_M)
+            sl_has_moving = any(
+                math.hypot(float(o.get('vx', 0.0)), float(o.get('vy', 0.0))) >= 0.5
+                for o in sl['obs_list']
+            )
 
             affects_lane = any(
                 (b_l < 0.05 and b_h > -0.05)
@@ -781,9 +785,10 @@ class LinearizedMpcController:
                 if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    for o in sl['obs_list']:
-                        if o.get('id') is not None:
-                            self.roadblock_latched_ids.add(o['id'])
+                    if not sl_has_moving:
+                        for o in sl['obs_list']:
+                            if o.get('id') is not None:
+                                self.roadblock_latched_ids.add(o['id'])
                     if sl_yl:
                         d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else f"{sl_road_min:.2f}m"
                         self.roadblock_reason = (
@@ -832,9 +837,10 @@ class LinearizedMpcController:
                 if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
                     self.is_roadblock = True
                     self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
-                    for o in sl['obs_list']:
-                        if o.get('id') is not None:
-                            self.roadblock_latched_ids.add(o['id'])
+                    if not sl_has_moving:
+                        for o in sl['obs_list']:
+                            if o.get('id') is not None:
+                                self.roadblock_latched_ids.add(o['id'])
                     if sl_yl:
                         d_yl_str = f"{self._yellow_d_line:.2f}m" if self._yellow_d_line is not None else f"{sl_road_min:.2f}m"
                         self.roadblock_reason = (
@@ -872,17 +878,21 @@ class LinearizedMpcController:
                     + max(7.5, 4.0 * dd_between)
                 )
                 if (not has_common_corridor or dd_between > 0.85) and ds_gap < ds_min_weave:
-                    if ENABLE_ROADBLOCK_EMERGENCY_STOP and is_ahead_of_ego:
+                    staggered_has_moving = sl_has_moving or prev_slice_info.get('has_moving', False)
+                    staggered_ahead = is_ahead_of_ego or (prev_slice_info.get('is_ahead', False) and not is_moving_away_far)
+                    if ENABLE_ROADBLOCK_EMERGENCY_STOP and staggered_ahead:
                         self.is_roadblock = True
-                        self.roadblock_barrier_dist = max(0.0, sl['s_rear'] - EGO_FRONT_OVERHANG_M - s_ego)
+                        barrier_s = sl['s_rear'] if is_ahead_of_ego else prev_slice_info['s_rear']
+                        self.roadblock_barrier_dist = max(0.0, barrier_s - EGO_FRONT_OVERHANG_M - s_ego)
                         self.roadblock_reason = (
-                            f"PHONG TỎA ĐƯỜNG SO LE (STAGGERED ROADBLOCK) tại s={sl['s_rear']:.1f}m: "
+                            f"PHONG TỎA ĐƯỜNG SO LE (STAGGERED ROADBLOCK) tại s={barrier_s:.1f}m: "
                             f"Khoảng cách dọc giữa 2 vật cản so le (Δs={ds_gap:.1f}m < {ds_min_weave:.1f}m) "
                             f"không đủ để lách ngang Δd={dd_between:.2f}m an toàn; dừng xe an toàn!"
                         )
                         for o in sl['obs_list']:
                             if o.get('id') is not None:
-                                self.roadblock_latched_ids.add(o['id'])
+                                if not staggered_has_moving:
+                                    self.roadblock_latched_ids.add(o['id'])
                                 if o['id'] in self.active_chain:
                                     del self.active_chain[o['id']]
                         blocking_slice = sl
@@ -903,7 +913,8 @@ class LinearizedMpcController:
                     )
                     for o in sl['obs_list']:
                         if o.get('id') is not None:
-                            self.roadblock_latched_ids.add(o['id'])
+                            if not sl_has_moving:
+                                self.roadblock_latched_ids.add(o['id'])
                             if o['id'] in self.active_chain:
                                 del self.active_chain[o['id']]
                     blocking_slice = sl
@@ -914,10 +925,13 @@ class LinearizedMpcController:
             sl['affects_lane'] = affects_lane or must_keep_side
             sl['min_s_app_start'] = min_s_app_start
             prev_slice_info = {
+                's_rear': sl['s_rear'],
                 's_front': sl['s_front'],
                 'gap': best_gap,
                 'd_target': actual_d_target,
                 'obs_list': sl['obs_list'],
+                'has_moving': sl_has_moving,
+                'is_ahead': is_ahead_of_ego,
             }
             if abs(sl['d_target']) > 0.05:
                 curr_sign = -1.0 if sl['d_target'] < 0 else 1.0

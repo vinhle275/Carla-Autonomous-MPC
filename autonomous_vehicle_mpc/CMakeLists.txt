@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(autonomous_vehicle_mpc CXX)
+project(autonomous_vehicle_mpc C CXX)
 
+set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -8,14 +9,40 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/libs
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/osqp/inc/public
 )
 
-# Thư viện hệ thống socket và IPC trên Windows / Linux
+# Thư viện hệ thống socket và IPC trên Windows / Linux / Raspberry Pi 5
 if(WIN32)
     set(SYSTEM_SOCKET_LIBS ws2_32)
 else()
     set(SYSTEM_SOCKET_LIBS pthread rt)
 endif()
+
+# ==============================================================================
+# 0. OFFICIAL OSQP v1.0.0 C LIBRARY (STATIC - ZERO EXTERNAL RUNTIME DLL/SO)
+# ==============================================================================
+add_library(av_osqp_static STATIC
+    third_party/osqp/src/algebra_libs.c
+    third_party/osqp/src/auxil.c
+    third_party/osqp/src/csc_math.c
+    third_party/osqp/src/csc_utils.c
+    third_party/osqp/src/error.c
+    third_party/osqp/src/kkt.c
+    third_party/osqp/src/matrix.c
+    third_party/osqp/src/osqp_api.c
+    third_party/osqp/src/qdldl.c
+    third_party/osqp/src/qdldl_interface.c
+    third_party/osqp/src/scaling.c
+    third_party/osqp/src/util.c
+    third_party/osqp/src/vector.c
+)
+target_include_directories(av_osqp_static
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/osqp/inc/public
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/osqp/inc/private
+)
 
 # ==============================================================================
 # LIBS: TẦNG THƯ VIỆN DÙNG CHUNG
@@ -36,7 +63,7 @@ target_link_libraries(av_safety_guard PUBLIC av_common)
 add_library(av_mpc_core STATIC
     libs/mpc_core/linearized_mpc_controller.cpp
 )
-target_link_libraries(av_mpc_core PUBLIC av_common)
+target_link_libraries(av_mpc_core PUBLIC av_common av_osqp_static)
 
 # 4. perception_core
 add_library(av_perception_core STATIC
@@ -98,3 +125,17 @@ target_link_libraries(autonomous_mpc_unified PRIVATE
     av_common
     ${SYSTEM_SOCKET_LIBS}
 )
+
+# Edge Case & Regression Test Suite (local only when tests/ exists)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edge_cases.cpp")
+    add_executable(test_edge_cases
+        tests/test_edge_cases.cpp
+    )
+    target_link_libraries(test_edge_cases PRIVATE
+        av_mpc_core
+        av_safety_guard
+        av_perception_core
+        av_common
+        ${SYSTEM_SOCKET_LIBS}
+    )
+endif()

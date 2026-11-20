@@ -499,8 +499,7 @@ int main(int argc, char* argv[]) {
                 cost = res.cost;
 
                 bool rb_latch = mpc_ctrl.is_roadblock_stopped();
-                auto act = safety::ActuationMapper::map_controls(
-                    res.steer_rad, res.acceleration_m_s2, v0, rb_latch, mpc_ctrl.is_roadblock());
+                auto act = safety::ActuationMapper::map_controls(res.steer_rad, res.acceleration_m_s2, v0, rb_latch);
                 cmd_out.throttle = act.throttle;
                 cmd_out.brake = act.brake;
                 cmd_out.steer = act.steer;
@@ -509,8 +508,8 @@ int main(int argc, char* argv[]) {
                 cmd_out.is_roadblock_latch = rb_latch;
             }
 
-            // BẢO VỆ TUYỆT ĐỐI KHÔNG CHẠM VẠCH VÀNG (Yellow Line Safety Shield <= 1.05m)
-            if (lane_res.line_type == types::LineType::SOLID && lane_res.d_yellow_line_m <= 1.05) {
+            // BẢO VỆ TUYỆT ĐỐI KHÔNG CHẠM VẠCH VÀNG (Yellow Line Safety Shield <= 1.05m - chỉ áp dụng ở Mode 1)
+            if (!s_info.is_emergency && lane_res.line_type == types::LineType::SOLID && lane_res.d_yellow_line_m <= 1.05) {
                 double v_lat_ego = v0 * std::sin(th0 - thr[0]);
                 if (mpc_ctrl.is_roadblock() || (lane_res.d_yellow_line_m <= 1.00 && v_lat_ego < -0.05 && v0 > 0.5)) {
                     cmd_out.throttle = 0.0;

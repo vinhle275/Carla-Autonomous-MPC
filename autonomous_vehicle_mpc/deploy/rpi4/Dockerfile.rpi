@@ -1,0 +1,53 @@
+# ==============================================================================
+# AUTONOMOUS VEHICLE MPC - RASPBERRY PI 4 DOCKERFILE (ARM64 MULTI-PROCESS ECU)
+# C++20 AUTOSAR Adaptive Platform Runtime (Siêu nhẹ < 45MB, Zero-Python)
+# ==============================================================================
+
+# STAGE 1: BUILD STAGE
+FROM debian:bullseye-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    g++ \
+    gcc \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY . .
+
+# Biên dịch cả 3 tiến trình C++20 độc lập cho Raspberry Pi
+RUN mkdir -p build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) paio_vehicle_interface autonomous_core hmi_diagnostics
+
+# ==============================================================================
+# STAGE 2: PRODUCTION EMBEDDED RUNTIME (Target Raspberry Pi 4)
+# ==============================================================================
+FROM debian:bullseye-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy 3 binary độc lập và file cấu hình
+COPY --from=builder /workspace/build/paio_vehicle_interface /app/
+COPY --from=builder /workspace/build/autonomous_core /app/
+COPY --from=builder /workspace/build/hmi_diagnostics /app/
+COPY --from=builder /workspace/configs /app/configs
+COPY deploy/rpi4/docker_autosar_em.sh /app/docker_autosar_em.sh
+
+RUN chmod +x /app/paio_vehicle_interface \
+             /app/autonomous_core \
+             /app/hmi_diagnostics \
+             /app/docker_autosar_em.sh
+
+# Điểm khởi chạy: Execution Manager điều phối 3 Process
+ENTRYPOINT ["/app/docker_autosar_em.sh"]
+CMD []

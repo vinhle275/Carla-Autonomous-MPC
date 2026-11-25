@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
     ipc::AraComPort<types::ActuatorCommandData> cmd_sub("ActuatorCommandService", false);
 
     const auto loop_period = std::chrono::milliseconds(10); // 100Hz
-    uint64_t last_cmd_timestamp_ns = ipc::get_current_time_ns();
+    uint64_t last_cmd_timestamp_ns = 0;
     double last_valid_steer = 0.0;
     uint32_t cycle_count = 0;
 
@@ -64,20 +64,18 @@ int main(int argc, char* argv[]) {
             state.sequence_id = cycle_count;
             state.is_valid = 1;
 
-            // Cứ mỗi 2 chu kỳ 100Hz (tức nhịp 50Hz), xuất bản tin sang Process 2 qua Shared Memory
-            if (cycle_count % 2 == 0) {
-                state_pub.write(state);
+            // Xuất bản tin sang Process 2 qua Shared Memory mỗi chu kỳ 100Hz
+            state_pub.write(state);
 
-                sensor_pkt.timestamp_ns = now_stamp;
-                sensor_pkt.sequence_id = cycle_count;
-                uint32_t n_act = static_cast<uint32_t>(std::min(actors.size(), types::MAX_RAW_ACTORS));
-                sensor_pkt.num_actors = n_act;
-                for (uint32_t i = 0; i < n_act; ++i) {
-                    sensor_pkt.actors[i] = actors[i];
-                }
-                sensor_pkt.is_valid = 1;
-                sensor_pub.write(sensor_pkt);
+            sensor_pkt.timestamp_ns = now_stamp;
+            sensor_pkt.sequence_id = cycle_count;
+            uint32_t n_act = static_cast<uint32_t>(std::min(actors.size(), types::MAX_RAW_ACTORS));
+            sensor_pkt.num_actors = n_act;
+            for (uint32_t i = 0; i < n_act; ++i) {
+                sensor_pkt.actors[i] = actors[i];
             }
+            sensor_pkt.is_valid = 1;
+            sensor_pub.write(sensor_pkt);
         } else if (connected && !hal_client.is_connected()) {
             break;
         }
@@ -95,9 +93,7 @@ int main(int argc, char* argv[]) {
 
         // 1.3 Giám sát Watchdog An Toàn 100ms (Fail-Safe Safe-State)
         uint64_t now_ns = ipc::get_current_time_ns();
-        uint64_t elapsed_ms = (now_ns > last_cmd_timestamp_ns) ? ((now_ns - last_cmd_timestamp_ns) / 1000000ULL) : 0;
-
-        if (elapsed_ms > config::WATCHDOG_TIMEOUT_MS) {
+        if (last_cmd_timestamp_ns > 0 && (now_ns - last_cmd_timestamp_ns) / 1000000ULL > config::WATCHDOG_TIMEOUT_MS) {
             // Quá 100ms không nhận được gói tin từ Process 2: Lập tức kích hoạt phanh an toàn!
             current_cmd.throttle = 0.0;
             current_cmd.brake = 1.0;

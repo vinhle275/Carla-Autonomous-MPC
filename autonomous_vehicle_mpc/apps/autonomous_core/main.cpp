@@ -119,11 +119,27 @@ int main(int argc, char* argv[]) {
         current_idx = proj.closest_idx;
 
         if (current_idx >= traj.size() - 2) {
-            std::cout << "[AUTONOMOUS CORE] Đã hoàn thành toàn bộ lộ trình!" << std::endl;
+            std::cout << "\n========================================================" << std::endl;
+            std::cout << "  [AUTONOMOUS CORE] XE ĐÃ HOÀN THÀNH QUỸ ĐẠO VÀ VỀ ĐÍCH AN TOÀN!" << std::endl;
+            std::cout << "========================================================" << std::endl;
             types::ActuatorCommandData stop_cmd{};
             stop_cmd.brake = 1.0;
+            stop_cmd.throttle = 0.0;
+            stop_cmd.steer = 0.0;
             stop_cmd.is_valid = true;
             cmd_pub.write(stop_cmd);
+
+            // Gửi bản tin Telemetry cuối cùng cho HMI Diagnostics hiển thị
+            types::TelemetryData final_telem{};
+            final_telem.timestamp_ns = ipc::get_current_time_ns();
+            final_telem.step_count = step_count;
+            final_telem.v_ego_m_s = 0.0;
+            final_telem.v_ref_m_s = 0.0;
+            final_telem.brake_cmd = 1.0;
+            std::snprintf(final_telem.status_text, sizeof(final_telem.status_text), "[VỀ ĐÍCH AN TOÀN]");
+            telemetry_pub.write(final_telem);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             break;
         }
 

@@ -1,0 +1,7 @@
+build/
+build_linux/
+venv/
+.git/
+graphify-out/
+__pycache__/
+*.log

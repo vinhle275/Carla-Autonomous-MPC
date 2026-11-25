@@ -91,39 +91,24 @@ private:
         size_t alloc_size = sizeof(SharedMemoryBuffer<T>);
 #ifdef _WIN32
         std::string win_name = "Global\\AV_ARA_" + port_name_;
-        if (is_producer_) {
+        shm_handle_ = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)alloc_size, win_name.c_str());
+        if (!shm_handle_) {
+            win_name = "Local\\AV_ARA_" + port_name_;
             shm_handle_ = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)alloc_size, win_name.c_str());
-            if (!shm_handle_) {
-                win_name = "Local\\AV_ARA_" + port_name_;
-                shm_handle_ = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)alloc_size, win_name.c_str());
-            }
-        } else {
-            shm_handle_ = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, win_name.c_str());
-            if (!shm_handle_) {
-                win_name = "Local\\AV_ARA_" + port_name_;
-                shm_handle_ = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, win_name.c_str());
-            }
         }
         if (shm_handle_) {
             shm_ptr_ = static_cast<SharedMemoryBuffer<T>*>(MapViewOfFile(shm_handle_, FILE_MAP_ALL_ACCESS, 0, 0, alloc_size));
-            if (is_producer_ && shm_ptr_) {
-                std::memset(shm_ptr_, 0, alloc_size);
-            }
         }
 #else
         std::string posix_name = "/av_ara_" + port_name_;
-        int flags = is_producer_ ? (O_CREAT | O_RDWR) : O_RDWR;
-        shm_fd_ = shm_open(posix_name.c_str(), flags, 0666);
+        // Cả producer và consumer đều dùng O_CREAT | O_RDWR để đảm bảo dù tiến trình nào
+        // khởi động trước thì phân vùng POSIX Shared Memory đều được khởi tạo và kết nối chung!
+        shm_fd_ = shm_open(posix_name.c_str(), O_CREAT | O_RDWR, 0666);
         if (shm_fd_ >= 0) {
-            if (is_producer_) {
-                ftruncate(shm_fd_, alloc_size);
-            }
+            ftruncate(shm_fd_, alloc_size);
             void* addr = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
             if (addr != MAP_FAILED) {
                 shm_ptr_ = static_cast<SharedMemoryBuffer<T>*>(addr);
-                if (is_producer_) {
-                    std::memset(shm_ptr_, 0, alloc_size);
-                }
             }
         }
 #endif

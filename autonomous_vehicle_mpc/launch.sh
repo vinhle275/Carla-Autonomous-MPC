@@ -18,8 +18,12 @@ echo "===================================================================="
 
 # Tự động phát hiện IP host Windows nếu chạy từ bên trong WSL2
 DEFAULT_HOST="127.0.0.1"
-if [ -f "/etc/resolv.conf" ] && grep -qi microsoft /proc/version 2>/dev/null; then
-    WSL_HOST=$(grep nameserver /etc/resolv.conf | awk '{print $2}')
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    # Lấy Default Gateway của WSL2 (chính là IP vEthernet của Windows host)
+    WSL_HOST=$(ip route show default 2>/dev/null | awk '{print $3}')
+    if [ -z "$WSL_HOST" ] && [ -f "/etc/resolv.conf" ]; then
+        WSL_HOST=$(grep nameserver /etc/resolv.conf | awk '{print $2}')
+    fi
     if [ -n "$WSL_HOST" ]; then
         DEFAULT_HOST="$WSL_HOST"
     fi

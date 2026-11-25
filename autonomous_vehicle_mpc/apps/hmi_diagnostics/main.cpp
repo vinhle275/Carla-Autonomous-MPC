@@ -71,7 +71,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 // In HUD ra màn hình console
-                if (telem.step_count % 5 == 0) { // In mỗi 100ms
+                if (telem.step_count % 5 == 0 || std::string(telem.status_text).find("VỀ ĐÍCH") != std::string::npos) { // In mỗi 100ms hoặc khi về đích
                     std::cout << std::left
                               << std::setw(8)  << telem.step_count
                               << std::setw(12) << std::fixed << std::setprecision(1) << v_kmh
@@ -83,6 +83,11 @@ int main(int argc, char* argv[]) {
                               << std::setw(12) << std::fixed << std::setprecision(2) << telem.jerk_filtered_m_s3
                               << std::setw(10) << std::fixed << std::setprecision(1) << telem.solve_time_ms
                               << telem.status_text << "\n";
+                }
+
+                if (std::string(telem.status_text).find("VỀ ĐÍCH") != std::string::npos) {
+                    std::cout << "\n[HMI] Ghi nhận xe đã về đích an toàn. Đóng chẩn đoán." << std::endl;
+                    break;
                 }
             }
         }

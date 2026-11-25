@@ -1,58 +1,40 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
+# CMake Build Output
 build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+build_linux/
+build_win/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled Binaries & Libraries
+*.exe
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.obj
+*.o
+*.pdb
+
+# Python Cache & Eggs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+egg_cache/
 *.egg-info/
-.installed.cfg
+dist/
 *.egg
 
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# IDE & Editor settings
+# IDE & Editor Configurations
 .vscode/
 .idea/
 *.swp
-*.swo
 *~
-
-# Operating System files
 .DS_Store
-Thumbs.db
 
-# Logs & temp files
+# Logs
 *.log
-
-*.csv
-*.png
-.plan/
-graphify-out/
-
-# Edge case test suite & scenarios (local testing only)
-data/test_scenarios/
-autonomous_vehicle_mpc/tests/
